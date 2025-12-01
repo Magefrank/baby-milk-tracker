@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X } from 'lucide-react';
+import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check } from 'lucide-react';
 
 export default function BabyMilkTracker() {
   const [amount, setAmount] = useState('');
@@ -8,6 +8,7 @@ export default function BabyMilkTracker() {
   const [loading, setLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [showSuccessToast, setShowSuccessToast] = useState(false);
   
   // 获取数据
   const fetchRecords = async () => {
@@ -57,7 +58,15 @@ export default function BabyMilkTracker() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [records]);
 
-  // 添加记录
+  // 显示成功提示
+  const showSuccess = () => {
+    setShowSuccessToast(true);
+    setTimeout(() => {
+      setShowSuccessToast(false);
+    }, 2000);
+  };
+
+  // 添加记录（乐观更新版本）
   const handleAddRecord = async (e) => {
     e.preventDefault();
     if (!amount) return;
@@ -67,6 +76,7 @@ export default function BabyMilkTracker() {
     const todayString = new Date().toISOString().split('T')[0];
     
     const newRecord = {
+      id: `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`, // 临时 ID
       amount: Number(amount),
       timestamp: Date.now(),
       dateString: todayString,
@@ -74,22 +84,42 @@ export default function BabyMilkTracker() {
     };
     
     try {
+      // 1. 乐观更新：立即添加到本地列表
+      setRecords(prevRecords => [...prevRecords, newRecord]);
+      setAmount('');
+      if (selectedDate !== todayString) {
+        setSelectedDate(todayString);
+      }
+      
+      // 显示成功提示
+      showSuccess();
+      
+      // 2. 发送到服务器
       const response = await fetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newRecord)
+        body: JSON.stringify({
+          amount: newRecord.amount,
+          timestamp: newRecord.timestamp,
+          dateString: newRecord.dateString,
+          displayTime: newRecord.displayTime
+        })
       });
       
       if (response.ok) {
-        setAmount('');
-        if (selectedDate !== todayString) {
-          setSelectedDate(todayString);
-        }
-        // 刷新数据
-        await fetchRecords();
+        // 3. 3秒后刷新，确保从 KV 获取最新数据（包含真实 ID）
+        setTimeout(() => {
+          fetchRecords();
+        }, 3000);
+      } else {
+        // 如果保存失败，移除刚才添加的记录
+        setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
+        alert('添加失败，请重试');
       }
     } catch (error) {
       console.error('添加记录失败:', error);
+      // 如果出错，移除刚才添加的记录
+      setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
       alert('添加失败，请重试');
     } finally {
       setIsSubmitting(false);
@@ -100,16 +130,31 @@ export default function BabyMilkTracker() {
   const handleDelete = async (id) => {
     if (!confirm('确定要删除这条记录吗？')) return;
     
+    // 保存原始记录，以便失败时恢复
+    const originalRecords = [...records];
+    
+    // 乐观更新：立即从列表中移除
+    setRecords(prevRecords => prevRecords.filter(r => r.id !== id));
+    
     try {
       const response = await fetch(`/api/records?id=${id}`, {
         method: 'DELETE'
       });
       
       if (response.ok) {
-        await fetchRecords();
+        // 2秒后刷新，确保同步
+        setTimeout(() => {
+          fetchRecords();
+        }, 2000);
+      } else {
+        // 如果删除失败，恢复记录
+        setRecords(originalRecords);
+        alert('删除失败，请重试');
       }
     } catch (error) {
       console.error('删除失败:', error);
+      // 如果出错，恢复记录
+      setRecords(originalRecords);
       alert('删除失败，请重试');
     }
   };
@@ -136,6 +181,18 @@ export default function BabyMilkTracker() {
 
   return (
     <div className="min-h-screen bg-rose-50 font-sans text-gray-800 pb-20 relative">
+      {/* Success Toast */}
+      {showSuccessToast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-5 duration-300">
+          <div className="bg-green-500 text-white px-6 py-3 rounded-full shadow-lg flex items-center gap-2">
+            <div className="bg-white rounded-full p-1">
+              <Check size={16} className="text-green-500" />
+            </div>
+            <span className="font-medium">记录成功！</span>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-10">
         <div className="max-w-md mx-auto px-4 py-4 flex items-center justify-between">
