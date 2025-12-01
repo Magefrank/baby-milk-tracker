@@ -90,12 +90,12 @@ export default function BabyMilkTracker() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [records]);
 
-  // 趋势数据（过去30天）
+  // 趋势数据（过去15天）
   const trendData = useMemo(() => {
-    const last30Days = [];
+    const last15Days = [];
     const today = new Date();
     
-    for (let i = 29; i >= 0; i--) {
+    for (let i = 14; i >= 0; i--) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
       const dateString = date.toISOString().split('T')[0];
@@ -104,14 +104,14 @@ export default function BabyMilkTracker() {
         .filter(r => r.dateString === dateString)
         .reduce((sum, r) => sum + Number(r.amount), 0);
       
-      last30Days.push({
+      last15Days.push({
         date: dateString,
         shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
         total: dayTotal
       });
     }
     
-    return last30Days;
+    return last15Days;
   }, [records]);
 
   // 计算趋势统计
@@ -540,7 +540,7 @@ export default function BabyMilkTracker() {
             <div className="p-4 border-b border-gray-100 flex items-center justify-between shrink-0">
               <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
                 <TrendingUp className="text-purple-500" size={20} />
-                30天趋势图
+                15天趋势图
               </h2>
               <button 
                 onClick={() => setShowTrendChart(false)}
@@ -645,7 +645,7 @@ export default function BabyMilkTracker() {
 
               {/* 说明 */}
               <div className="mt-4 text-sm text-gray-500 text-center">
-                显示最近30天的每日总摄入量趋势
+                显示最近15天的每日总摄入量趋势
               </div>
             </div>
           </div>
