@@ -57,7 +57,16 @@ export default function BabyMilkTracker() {
   // 获取数据（智能合并版本）
   const fetchRecords = async (shouldMerge = false) => {
     try {
-      const response = await fetch('/api/records');
+      // 添加时间戳参数防止缓存
+      const timestamp = new Date().getTime();
+      const response = await fetch(`/api/records?_t=${timestamp}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
+      
       if (response.ok) {
         const data = await response.json();
         
@@ -269,7 +278,7 @@ export default function BabyMilkTracker() {
     
     const originalRecords = [...records];
     
-    // 乐观更新 - 立即更新本地状态
+    // 创建更新后的记录数组
     const updatedRecords = records.map(r => {
       if (r.id === record.id) {
         return {
@@ -281,8 +290,8 @@ export default function BabyMilkTracker() {
       return r;
     });
     
-    // 按显示时间重新排序后更新
-    setRecords(updatedRecords);
+    // 立即更新状态（触发重新渲染和排序）
+    setRecords([...updatedRecords]);
     
     cancelEdit();
     showSuccess();
