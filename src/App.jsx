@@ -321,35 +321,27 @@ export default function BabyMilkTracker() {
     }
   };
 
-// 删除记录
-const handleDelete = async (id) => {
-  if (!confirm('确定要删除这条记录吗?')) return;
-  
-  const originalRecords = [...records];
-  // 立即更新本地状态（删除记录并重新排序）
-  const updatedRecords = records.filter(r => r.id !== id);
-  setRecords(sortRecordsByTime(updatedRecords));
-  
-  try {
-    const response = await fetch(`/api/records?id=${id}`, {
-      method: 'DELETE'
-    });
+  // 删除记录
+  const handleDelete = async (id) => {
+    if (!confirm('确定要删除这条记录吗?')) return;
     
-    if (response.ok) {
-      // 2秒后同步服务器数据
-      setTimeout(() => {
-        fetchRecords();
-      }, 2000);
-    } else {
-      setRecords(originalRecords);
+    try {
+      // 先从服务器删除
+      const response = await fetch(`/api/records?id=${id}`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        // 删除成功后立即重新获取服务器数据
+        await fetchRecords();
+      } else {
+        alert('删除失败,请重试');
+      }
+    } catch (error) {
+      console.error('删除失败:', error);
       alert('删除失败,请重试');
     }
-  } catch (error) {
-    console.error('删除失败:', error);
-    setRecords(originalRecords);
-    alert('删除失败,请重试');
-  }
-};
+  };
 
   // 切换日期
   const changeDate = (offset) => {
