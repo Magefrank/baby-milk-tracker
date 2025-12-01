@@ -1,6 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, AlertCircle, TrendingUp } from 'lucide-react';
 
+// 注册 Service Worker
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then(registration => console.log('PWA registered'))
+      .catch(error => console.log('PWA registration failed'));
+  });
+}
+
 export default function BabyMilkTracker() {
   const [amount, setAmount] = useState('');
   const [records, setRecords] = useState([]);
@@ -16,7 +25,7 @@ export default function BabyMilkTracker() {
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   
-  // 正确的密码（你可以修改这个）
+  // 正确的密码
   const CORRECT_PASSWORD = 'mumu';
   
   // 编辑状态
@@ -45,7 +54,7 @@ export default function BabyMilkTracker() {
     }
   };
   
-  // 获取数据
+  // 获取数据（智能合并版本）
   const fetchRecords = async (shouldMerge = false) => {
     try {
       const response = await fetch('/api/records');
@@ -679,7 +688,7 @@ export default function BabyMilkTracker() {
                       />
                     </svg>
                     
-                    {/* 数据点 - 用绝对定位保持正圆 */}
+                    {/* 数据点 */}
                     <div className="absolute w-full h-full bottom-8" style={{ left: '10px', right: '10px' }}>
                       {trendData.map((d, i) => {
                         const xPercent = (i / (trendData.length - 1)) * 100;
@@ -707,7 +716,7 @@ export default function BabyMilkTracker() {
                       })}
                     </div>
                     
-                    {/* X轴标签 - 放在图表内部底部 */}
+                    {/* X轴标签 */}
                     <div className="absolute bottom-0 left-0 right-0 flex justify-between text-xs text-gray-500">
                       <span>{trendData[0]?.shortDate}</span>
                       <span>{trendData[Math.floor(trendData.length / 2)]?.shortDate}</span>
