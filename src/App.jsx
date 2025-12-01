@@ -10,13 +10,23 @@ export default function BabyMilkTracker() {
   const [showStats, setShowStats] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   
-  // 获取数据
-  const fetchRecords = async () => {
+  // 获取数据（智能合并版本）
+  const fetchRecords = async (shouldMerge = false) => {
     try {
       const response = await fetch('/api/records');
       if (response.ok) {
         const data = await response.json();
-        setRecords(data);
+        
+        if (shouldMerge) {
+          // 智能合并：保留本地临时记录，同时添加服务器新记录
+          setRecords(prevRecords => {
+            const tempRecords = prevRecords.filter(r => r.id.startsWith('temp_'));
+            const serverRecords = data.filter(r => !r.id.startsWith('temp_'));
+            return [...tempRecords, ...serverRecords];
+          });
+        } else {
+          setRecords(data);
+        }
       }
     } catch (error) {
       console.error('获取数据失败:', error);
@@ -29,7 +39,7 @@ export default function BabyMilkTracker() {
   useEffect(() => {
     fetchRecords();
     // 每30秒自动刷新一次
-    const interval = setInterval(fetchRecords, 30000);
+    const interval = setInterval(() => fetchRecords(false), 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -107,10 +117,10 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
-        // 3. 3秒后刷新，确保从 KV 获取最新数据（包含真实 ID）
+        // 3. 10秒后智能刷新，给 KV 足够的同步时间
         setTimeout(() => {
-          fetchRecords();
-        }, 3000);
+          fetchRecords(true);
+        }, 10000);
       } else {
         // 如果保存失败，移除刚才添加的记录
         setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
@@ -142,10 +152,10 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
-        // 2秒后刷新，确保同步
+        // 5秒后刷新，确保同步
         setTimeout(() => {
-          fetchRecords();
-        }, 2000);
+          fetchRecords(false);
+        }, 5000);
       } else {
         // 如果删除失败，恢复记录
         setRecords(originalRecords);
