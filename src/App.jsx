@@ -104,22 +104,38 @@ export default function BabyMilkTracker() {
     return filteredRecords.reduce((sum, record) => sum + Number(record.amount), 0);
   }, [filteredRecords]);
 
-  // 计算距离上次喂奶的时间
+  // 计算距离上次喂奶的时间（按显示时间计算）
   const timeSinceLastFeed = useMemo(() => {
     const todayRecords = records
       .filter(r => r.dateString === new Date().toISOString().split('T')[0])
-      .sort((a, b) => b.timestamp - a.timestamp);
+      .sort((a, b) => {
+        // 按显示时间排序
+        const timeA = a.displayTime.split(':').map(Number);
+        const timeB = b.displayTime.split(':').map(Number);
+        const minutesA = timeA[0] * 60 + timeA[1];
+        const minutesB = timeB[0] * 60 + timeB[1];
+        return minutesB - minutesA;
+      });
     
     if (todayRecords.length === 0) return null;
     
     const lastFeed = todayRecords[0];
-    const now = Date.now();
-    const diff = now - lastFeed.timestamp;
+    const now = new Date();
     
-    const hours = Math.floor(diff / (1000 * 60 * 60));
-    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    // 将显示时间转换为今天的完整时间
+    const [hours, minutes] = lastFeed.displayTime.split(':').map(Number);
+    const lastFeedTime = new Date();
+    lastFeedTime.setHours(hours, minutes, 0, 0);
     
-    return { hours, minutes, isLongGap: hours >= 3 };
+    const diff = now - lastFeedTime;
+    
+    // 如果差值为负数（可能是编辑了未来的时间），返回0
+    if (diff < 0) return null;
+    
+    const diffHours = Math.floor(diff / (1000 * 60 * 60));
+    const diffMinutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    
+    return { hours: diffHours, minutes: diffMinutes, isLongGap: diffHours >= 3 };
   }, [records]);
 
   // 每日统计
@@ -253,8 +269,8 @@ export default function BabyMilkTracker() {
     
     const originalRecords = [...records];
     
-    // 乐观更新
-    setRecords(prevRecords => prevRecords.map(r => {
+    // 乐观更新 - 立即更新本地状态
+    const updatedRecords = records.map(r => {
       if (r.id === record.id) {
         return {
           ...r,
@@ -263,12 +279,16 @@ export default function BabyMilkTracker() {
         };
       }
       return r;
-    }));
+    });
+    
+    // 按显示时间重新排序后更新
+    setRecords(updatedRecords);
     
     cancelEdit();
     showSuccess();
     
     try {
+      // 删除旧记录并创建新记录
       await fetch(`/api/records?id=${record.id}`, { method: 'DELETE' });
       await fetch('/api/records', {
         method: 'POST',
@@ -281,6 +301,7 @@ export default function BabyMilkTracker() {
         })
       });
       
+      // 5秒后同步服务器数据
       setTimeout(() => {
         fetchRecords(false);
       }, 5000);
