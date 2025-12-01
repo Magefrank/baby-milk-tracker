@@ -85,11 +85,18 @@ export default function BabyMilkTracker() {
     return () => clearInterval(interval);
   }, []);
 
-  // 过滤和排序记录
+  // 过滤和排序记录（按显示时间排序）
   const filteredRecords = useMemo(() => {
     return records
       .filter(record => record.dateString === selectedDate)
-      .sort((a, b) => b.timestamp - a.timestamp);
+      .sort((a, b) => {
+        // 将 HH:MM 格式转换为可比较的数字
+        const timeA = a.displayTime.split(':').map(Number);
+        const timeB = b.displayTime.split(':').map(Number);
+        const minutesA = timeA[0] * 60 + timeA[1];
+        const minutesB = timeB[0] * 60 + timeB[1];
+        return minutesB - minutesA; // 倒序：最新的在最上面
+      });
   }, [records, selectedDate]);
 
   // 计算总量
