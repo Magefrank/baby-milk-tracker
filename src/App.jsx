@@ -11,10 +11,39 @@ export default function BabyMilkTracker() {
   const [showTrendChart, setShowTrendChart] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   
+  // 密码保护
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [password, setPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  
+  // 正确的密码（你可以修改这个）
+  const CORRECT_PASSWORD = 'mumu';
+  
   // 编辑状态
   const [editingRecord, setEditingRecord] = useState(null);
   const [editAmount, setEditAmount] = useState('');
   const [editTime, setEditTime] = useState('');
+  
+  // 检查是否已验证
+  useEffect(() => {
+    const authToken = localStorage.getItem('baby_tracker_auth');
+    if (authToken === 'authenticated') {
+      setIsAuthenticated(true);
+    }
+  }, []);
+  
+  // 验证密码
+  const handlePasswordSubmit = (e) => {
+    e.preventDefault();
+    if (password === CORRECT_PASSWORD) {
+      localStorage.setItem('baby_tracker_auth', 'authenticated');
+      setIsAuthenticated(true);
+      setPasswordError('');
+    } else {
+      setPasswordError('密码错误，请重试');
+      setPassword('');
+    }
+  };
   
   // 获取数据
   const fetchRecords = async (shouldMerge = false) => {
@@ -281,6 +310,51 @@ export default function BabyMilkTracker() {
   };
 
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
+
+  // 如果未验证，显示密码输入页面
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-rose-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl shadow-xl p-8 w-full max-w-md">
+          <div className="text-center mb-6">
+            <div className="bg-rose-100 p-4 rounded-full text-rose-500 inline-block mb-4">
+              <Baby size={48} />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-800">沐沐喝奶记</h1>
+            <p className="text-gray-500 mt-2">请输入密码访问</p>
+          </div>
+          
+          <form onSubmit={handlePasswordSubmit} className="space-y-4">
+            <div>
+              <input
+                type="password"
+                placeholder="输入密码"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-gray-50 border-0 rounded-xl px-4 py-3 text-lg font-medium focus:ring-2 focus:ring-rose-400 outline-none transition"
+                autoFocus
+              />
+              {passwordError && (
+                <p className="text-red-500 text-sm mt-2">{passwordError}</p>
+              )}
+            </div>
+            
+            <button
+              type="submit"
+              disabled={!password}
+              className="w-full bg-rose-500 text-white rounded-xl py-3 font-semibold hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              确认
+            </button>
+          </form>
+          
+          <div className="mt-6 text-center text-xs text-gray-400">
+            首次在此设备访问需要验证密码
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
