@@ -208,10 +208,10 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
-        // 2秒后重新获取所有数据,替换临时记录
+        // 10秒后重新获取所有数据,替换临时记录
         setTimeout(() => {
           fetchRecords();
-        }, 2000);
+        }, 10000);
       } else {
         // 失败则移除临时记录
         setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
@@ -282,10 +282,10 @@ export default function BabyMilkTracker() {
       
       if (!createResponse.ok) throw new Error('创建失败');
       
-      // 2秒后同步服务器数据
+      // 10秒后同步服务器数据
       setTimeout(() => {
         fetchRecords();
-      }, 2000);
+      }, 10000);
     } catch (error) {
       console.error('编辑失败:', error);
       setRecords(sortRecordsByTime(originalRecords));
@@ -309,10 +309,10 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
-        // 2秒后同步服务器数据
+        // 10秒后同步服务器数据
         setTimeout(() => {
           fetchRecords();
-        }, 2000);
+        }, 10000);
       } else {
         // 失败则恢复
         setRecords(sortRecordsByTime(originalRecords));
