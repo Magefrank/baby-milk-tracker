@@ -10,6 +10,22 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// 统一的排序函数
+const sortRecordsByTime = (records) => {
+  return [...records].sort((a, b) => {
+    // 先按日期排序(降序)
+    if (a.dateString !== b.dateString) {
+      return b.dateString.localeCompare(a.dateString);
+    }
+    // 同一天,按显示时间排序(降序)
+    const timeA = a.displayTime.split(':').map(Number);
+    const timeB = b.displayTime.split(':').map(Number);
+    const minutesA = timeA[0] * 60 + timeA[1];
+    const minutesB = timeB[0] * 60 + timeB[1];
+    return minutesB - minutesA;
+  });
+};
+
 export default function BabyMilkTracker() {
   const [amount, setAmount] = useState('');
   const [records, setRecords] = useState([]);
@@ -49,15 +65,14 @@ export default function BabyMilkTracker() {
       setIsAuthenticated(true);
       setPasswordError('');
     } else {
-      setPasswordError('密码错误，请重试');
+      setPasswordError('密码错误,请重试');
       setPassword('');
     }
   };
   
-  // 获取数据（智能合并版本）
-  const fetchRecords = async (shouldMerge = false) => {
+  // 获取数据
+  const fetchRecords = async () => {
     try {
-      // 添加时间戳参数防止缓存
       const timestamp = new Date().getTime();
       const response = await fetch(`/api/records?_t=${timestamp}`, {
         cache: 'no-store',
@@ -69,16 +84,8 @@ export default function BabyMilkTracker() {
       
       if (response.ok) {
         const data = await response.json();
-        
-        if (shouldMerge) {
-          setRecords(prevRecords => {
-            const tempRecords = prevRecords.filter(r => r.id.startsWith('temp_'));
-            const serverRecords = data.filter(r => !r.id.startsWith('temp_'));
-            return [...tempRecords, ...serverRecords];
-          });
-        } else {
-          setRecords(data);
-        }
+        // 使用统一的排序函数
+        setRecords(sortRecordsByTime(data));
       }
     } catch (error) {
       console.error('获取数据失败:', error);
@@ -90,22 +97,14 @@ export default function BabyMilkTracker() {
   // 初始加载数据
   useEffect(() => {
     fetchRecords();
-    const interval = setInterval(() => fetchRecords(false), 30000);
+    // 定期同步(降低频率到60秒)
+    const interval = setInterval(() => fetchRecords(), 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // 过滤和排序记录（按显示时间排序）
+  // 过滤记录(使用已排序的records)
   const filteredRecords = useMemo(() => {
-    return records
-      .filter(record => record.dateString === selectedDate)
-      .sort((a, b) => {
-        // 将 HH:MM 格式转换为可比较的数字
-        const timeA = a.displayTime.split(':').map(Number);
-        const timeB = b.displayTime.split(':').map(Number);
-        const minutesA = timeA[0] * 60 + timeA[1];
-        const minutesB = timeB[0] * 60 + timeB[1];
-        return minutesB - minutesA; // 倒序：最新的在最上面
-      });
+    return records.filter(record => record.dateString === selectedDate);
   }, [records, selectedDate]);
 
   // 计算总量
@@ -113,21 +112,14 @@ export default function BabyMilkTracker() {
     return filteredRecords.reduce((sum, record) => sum + Number(record.amount), 0);
   }, [filteredRecords]);
 
-  // 计算距离上次喂奶的时间（按显示时间计算）
+  // 计算距离上次喂奶的时间(使用全局已排序的records)
   const timeSinceLastFeed = useMemo(() => {
-    const todayRecords = records
-      .filter(r => r.dateString === new Date().toISOString().split('T')[0])
-      .sort((a, b) => {
-        // 按显示时间排序
-        const timeA = a.displayTime.split(':').map(Number);
-        const timeB = b.displayTime.split(':').map(Number);
-        const minutesA = timeA[0] * 60 + timeA[1];
-        const minutesB = timeB[0] * 60 + timeB[1];
-        return minutesB - minutesA;
-      });
+    const todayString = new Date().toISOString().split('T')[0];
+    const todayRecords = records.filter(r => r.dateString === todayString);
     
     if (todayRecords.length === 0) return null;
     
+    // 因为records已经正确排序,直接取第一个
     const lastFeed = todayRecords[0];
     const now = new Date();
     
@@ -138,7 +130,7 @@ export default function BabyMilkTracker() {
     
     const diff = now - lastFeedTime;
     
-    // 如果差值为负数（可能是编辑了未来的时间），返回0
+    // 如果差值为负数(可能是编辑了未来的时间),返回null
     if (diff < 0) return null;
     
     const diffHours = Math.floor(diff / (1000 * 60 * 60));
@@ -160,7 +152,7 @@ export default function BabyMilkTracker() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [records]);
 
-  // 趋势数据（过去15天）
+  // 趋势数据(过去15天)
   const trendData = useMemo(() => {
     const last15Days = [];
     const today = new Date();
@@ -218,11 +210,12 @@ export default function BabyMilkTracker() {
       amount: Number(amount),
       timestamp: Date.now(),
       dateString: todayString,
-      displayTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      displayTime: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     };
     
     try {
-      setRecords(prevRecords => [...prevRecords, newRecord]);
+      // 立即添加到本地状态并排序
+      setRecords(prevRecords => sortRecordsByTime([...prevRecords, newRecord]));
       setAmount('');
       if (selectedDate !== todayString) {
         setSelectedDate(todayString);
@@ -230,6 +223,7 @@ export default function BabyMilkTracker() {
       
       showSuccess();
       
+      // 提交到服务器
       const response = await fetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -242,17 +236,19 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
+        // 2秒后重新获取所有数据,替换临时记录
         setTimeout(() => {
-          fetchRecords(true);
-        }, 10000);
+          fetchRecords();
+        }, 2000);
       } else {
+        // 失败则移除临时记录
         setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
-        alert('添加失败，请重试');
+        alert('添加失败,请重试');
       }
     } catch (error) {
       console.error('添加记录失败:', error);
       setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
-      alert('添加失败，请重试');
+      alert('添加失败,请重试');
     } finally {
       setIsSubmitting(false);
     }
@@ -274,56 +270,60 @@ export default function BabyMilkTracker() {
 
   // 保存编辑
   const saveEdit = async (record) => {
-    if (!editAmount) return;
+    if (!editAmount || !editTime) return;
     
     const originalRecords = [...records];
     
-    // 创建更新后的记录数组
-    const updatedRecords = records.map(r => {
-      if (r.id === record.id) {
-        return {
-          ...r,
-          amount: Number(editAmount),
-          displayTime: editTime
-        };
-      }
-      return r;
-    });
+    // 创建更新后的记录
+    const updatedRecord = {
+      ...record,
+      amount: Number(editAmount),
+      displayTime: editTime
+    };
     
-    // 立即更新状态（触发重新渲染和排序）
-    setRecords([...updatedRecords]);
+    // 立即更新本地状态并重新排序
+    const updatedRecords = records.map(r => r.id === record.id ? updatedRecord : r);
+    setRecords(sortRecordsByTime(updatedRecords));
     
     cancelEdit();
     showSuccess();
     
     try {
-      // 删除旧记录并创建新记录
-      await fetch(`/api/records?id=${record.id}`, { method: 'DELETE' });
-      await fetch('/api/records', {
+      // 先删除旧记录
+      const deleteResponse = await fetch(`/api/records?id=${record.id}`, { 
+        method: 'DELETE' 
+      });
+      
+      if (!deleteResponse.ok) throw new Error('删除失败');
+      
+      // 再创建新记录
+      const createResponse = await fetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          amount: Number(editAmount),
+          amount: updatedRecord.amount,
           timestamp: record.timestamp,
           dateString: record.dateString,
-          displayTime: editTime
+          displayTime: updatedRecord.displayTime
         })
       });
       
-      // 5秒后同步服务器数据
+      if (!createResponse.ok) throw new Error('创建失败');
+      
+      // 2秒后同步服务器数据
       setTimeout(() => {
-        fetchRecords(false);
-      }, 5000);
+        fetchRecords();
+      }, 2000);
     } catch (error) {
       console.error('编辑失败:', error);
-      setRecords(originalRecords);
-      alert('编辑失败，请重试');
+      setRecords(sortRecordsByTime(originalRecords));
+      alert('编辑失败,请重试');
     }
   };
 
   // 删除记录
   const handleDelete = async (id) => {
-    if (!confirm('确定要删除这条记录吗？')) return;
+    if (!confirm('确定要删除这条记录吗?')) return;
     
     const originalRecords = [...records];
     setRecords(prevRecords => prevRecords.filter(r => r.id !== id));
@@ -334,17 +334,18 @@ export default function BabyMilkTracker() {
       });
       
       if (response.ok) {
+        // 2秒后同步服务器数据
         setTimeout(() => {
-          fetchRecords(false);
-        }, 5000);
+          fetchRecords();
+        }, 2000);
       } else {
         setRecords(originalRecords);
-        alert('删除失败，请重试');
+        alert('删除失败,请重试');
       }
     } catch (error) {
       console.error('删除失败:', error);
       setRecords(originalRecords);
-      alert('删除失败，请重试');
+      alert('删除失败,请重试');
     }
   };
 
@@ -357,7 +358,7 @@ export default function BabyMilkTracker() {
 
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
 
-  // 如果未验证，显示密码输入页面
+  // 如果未验证,显示密码输入页面
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-rose-50 flex items-center justify-center p-4">
@@ -370,13 +371,18 @@ export default function BabyMilkTracker() {
             <p className="text-gray-500 mt-2">请输入密码访问</p>
           </div>
           
-          <form onSubmit={handlePasswordSubmit} className="space-y-4">
+          <div className="space-y-4">
             <div>
               <input
                 type="password"
                 placeholder="输入密码"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && password) {
+                    handlePasswordSubmit(e);
+                  }
+                }}
                 className="w-full bg-gray-50 border-0 rounded-xl px-4 py-3 text-lg font-medium focus:ring-2 focus:ring-rose-400 outline-none transition"
                 autoFocus
               />
@@ -386,13 +392,13 @@ export default function BabyMilkTracker() {
             </div>
             
             <button
-              type="submit"
+              onClick={handlePasswordSubmit}
               disabled={!password}
               className="w-full bg-rose-500 text-white rounded-xl py-3 font-semibold hover:bg-rose-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
             >
               确认
             </button>
-          </form>
+          </div>
           
           <div className="mt-6 text-center text-xs text-gray-400">
             首次在此设备访问需要验证密码
@@ -422,7 +428,7 @@ export default function BabyMilkTracker() {
             <div className="bg-white rounded-full p-1">
               <Check size={16} className="text-green-500" />
             </div>
-            <span className="font-medium">记录成功！</span>
+            <span className="font-medium">记录成功!</span>
           </div>
         </div>
       )}
@@ -518,7 +524,7 @@ export default function BabyMilkTracker() {
 
         {/* Add Record Form */}
         {isToday ? (
-          <form onSubmit={handleAddRecord} className="bg-white rounded-2xl p-4 shadow-sm border border-rose-100">
+          <div className="bg-white rounded-2xl p-4 shadow-sm border border-rose-100">
             <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">
               新增记录
             </label>
@@ -530,13 +536,18 @@ export default function BabyMilkTracker() {
                   placeholder="输入奶量"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter' && amount && !isSubmitting) {
+                      handleAddRecord(e);
+                    }
+                  }}
                   className="w-full bg-gray-50 border-0 rounded-xl px-4 py-3 text-lg font-medium focus:ring-2 focus:ring-rose-400 outline-none transition appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                   autoFocus
                 />
                 <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-medium">ml</span>
               </div>
               <button 
-                type="submit" 
+                onClick={handleAddRecord}
                 disabled={!amount || isSubmitting}
                 className="bg-gray-900 text-white rounded-xl px-6 py-3 font-semibold hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition flex items-center gap-2"
               >
@@ -550,7 +561,6 @@ export default function BabyMilkTracker() {
               {[120, 150, 180, 190, 200, 210].map((val) => (
                 <button
                   key={val}
-                  type="button"
                   onClick={() => setAmount(val.toString())}
                   className="px-3 py-1.5 bg-rose-50 text-rose-600 text-sm font-medium rounded-lg hover:bg-rose-100 transition whitespace-nowrap"
                 >
@@ -558,10 +568,10 @@ export default function BabyMilkTracker() {
                 </button>
               ))}
             </div>
-          </form>
+          </div>
         ) : (
           <div className="text-center py-4 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400 text-sm">
-             只能记录当天的喂奶数据哦
+            只能记录当天的喂奶数据哦
           </div>
         )}
 
@@ -583,7 +593,7 @@ export default function BabyMilkTracker() {
                 <div key={record.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between group">
                   {editingRecord === record.id ? (
                     // 编辑模式
-                    <div className="flex-1 flex items-center gap-3">
+                    <div className="flex-1 flex items-center gap-3 flex-wrap">
                       <input
                         type="number"
                         value={editAmount}
@@ -730,7 +740,7 @@ export default function BabyMilkTracker() {
                       {trendData.map((d, i) => {
                         const xPercent = (i / (trendData.length - 1)) * 100;
                         const yPercent = 100 - Math.min((d.total / 1500) * 100, 100);
-                        const isToday = d.date === new Date().toISOString().split('T')[0];
+                        const isTodayDate = d.date === new Date().toISOString().split('T')[0];
                         
                         return (
                           <div
@@ -743,7 +753,7 @@ export default function BabyMilkTracker() {
                             }}
                           >
                             {/* 今天的外圈 */}
-                            {isToday && (
+                            {isTodayDate && (
                               <div className="absolute inset-0 w-5 h-5 rounded-full border-2 border-rose-400 -translate-x-1/2 -translate-y-1/2" style={{ left: '50%', top: '50%' }}></div>
                             )}
                             {/* 圆点 */}
@@ -791,9 +801,9 @@ export default function BabyMilkTracker() {
 
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
               {dailyStats.length === 0 ? (
-                 <div className="text-center py-10 text-gray-400">
-                   暂无历史数据
-                 </div>
+                <div className="text-center py-10 text-gray-400">
+                  暂无历史数据
+                </div>
               ) : (
                 dailyStats.map((stat, index) => (
                   <div 
