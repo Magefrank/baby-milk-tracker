@@ -1,0 +1,9 @@
+name = "baby-milk-tracker"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "MILK_RECORDS"
+id = "c096e676d4344555aea1a7226f3aa990"
+
+[build]
+command = "npm run build"
