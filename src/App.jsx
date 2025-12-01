@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, AlertCircle, TrendingUp } from 'lucide-react';
+import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, TrendingUp } from 'lucide-react';
 
 // 注册 Service Worker
 if ('serviceWorker' in navigator) {
@@ -97,7 +97,7 @@ export default function BabyMilkTracker() {
   // 初始加载数据
   useEffect(() => {
     fetchRecords();
-    // 定期同步(降低频率到60秒)
+    // 定期同步(60秒)
     const interval = setInterval(() => fetchRecords(), 60000);
     return () => clearInterval(interval);
   }, []);
@@ -111,33 +111,6 @@ export default function BabyMilkTracker() {
   const totalAmount = useMemo(() => {
     return filteredRecords.reduce((sum, record) => sum + Number(record.amount), 0);
   }, [filteredRecords]);
-
-  // 计算距离上次喂奶的时间(使用全局已排序的records)
-  const timeSinceLastFeed = useMemo(() => {
-    const todayString = new Date().toISOString().split('T')[0];
-    const todayRecords = records.filter(r => r.dateString === todayString);
-    
-    if (todayRecords.length === 0) return null;
-    
-    // 因为records已经正确排序,直接取第一个
-    const lastFeed = todayRecords[0];
-    const now = new Date();
-    
-    // 将显示时间转换为今天的完整时间
-    const [hours, minutes] = lastFeed.displayTime.split(':').map(Number);
-    const lastFeedTime = new Date();
-    lastFeedTime.setHours(hours, minutes, 0, 0);
-    
-    const diff = now - lastFeedTime;
-    
-    // 如果差值为负数(可能是编辑了未来的时间),返回null
-    if (diff < 0) return null;
-    
-    const diffHours = Math.floor(diff / (1000 * 60 * 60));
-    const diffMinutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-    
-    return { hours: diffHours, minutes: diffMinutes, isLongGap: diffHours >= 3 };
-  }, [records]);
 
   // 每日统计
   const dailyStats = useMemo(() => {
@@ -325,20 +298,30 @@ export default function BabyMilkTracker() {
   const handleDelete = async (id) => {
     if (!confirm('确定要删除这条记录吗?')) return;
     
+    const originalRecords = [...records];
+    
+    // 立即从本地删除并重新排序
+    const updatedRecords = records.filter(r => r.id !== id);
+    setRecords(sortRecordsByTime(updatedRecords));
+    
     try {
-      // 先从服务器删除
       const response = await fetch(`/api/records?id=${id}`, {
         method: 'DELETE'
       });
       
       if (response.ok) {
-        // 删除成功后立即重新获取服务器数据
-        await fetchRecords();
+        // 2秒后同步服务器数据
+        setTimeout(() => {
+          fetchRecords();
+        }, 2000);
       } else {
+        // 失败则恢复
+        setRecords(sortRecordsByTime(originalRecords));
         alert('删除失败,请重试');
       }
     } catch (error) {
       console.error('删除失败:', error);
+      setRecords(sortRecordsByTime(originalRecords));
       alert('删除失败,请重试');
     }
   };
@@ -457,24 +440,6 @@ export default function BabyMilkTracker() {
 
       {/* Main Content */}
       <main className="max-w-md mx-auto px-4 py-6 space-y-6">
-        
-        {/* Time Since Last Feed Warning */}
-        {isToday && timeSinceLastFeed && (
-          <div className={`${timeSinceLastFeed.isLongGap ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'} border rounded-2xl p-4 flex items-center gap-3`}>
-            <div className={`${timeSinceLastFeed.isLongGap ? 'text-orange-500' : 'text-blue-500'}`}>
-              <AlertCircle size={24} />
-            </div>
-            <div>
-              <div className="font-semibold text-gray-800">
-                距离上次喂奶已过
-              </div>
-              <div className={`text-2xl font-bold ${timeSinceLastFeed.isLongGap ? 'text-orange-600' : 'text-blue-600'}`}>
-                {timeSinceLastFeed.hours > 0 && `${timeSinceLastFeed.hours} 小时 `}
-                {timeSinceLastFeed.minutes} 分钟
-              </div>
-            </div>
-          </div>
-        )}
         
         {/* Date Navigator */}
         <div className="flex items-center justify-between bg-white p-3 rounded-2xl shadow-sm">
