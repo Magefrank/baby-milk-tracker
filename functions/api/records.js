@@ -19,6 +19,20 @@ export async function onRequestGet(context) {
       }
     }
     
+    // 按日期和时间排序（降序）
+    records.sort((a, b) => {
+      // 先按日期排序
+      if (a.dateString !== b.dateString) {
+        return b.dateString.localeCompare(a.dateString);
+      }
+      // 同一天，按显示时间排序
+      const timeA = a.displayTime.split(':').map(Number);
+      const timeB = b.displayTime.split(':').map(Number);
+      const minutesA = timeA[0] * 60 + timeA[1];
+      const minutesB = timeB[0] * 60 + timeB[1];
+      return minutesB - minutesA;
+    });
+    
     return new Response(JSON.stringify(records), {
       headers: {
         'Content-Type': 'application/json',
