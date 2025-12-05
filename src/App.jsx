@@ -10,50 +10,59 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// 优化的排序函数：修复了编辑时间后排序不更新的问题
-// 新逻辑：日期 -> 显示时间(HH:mm) -> 创建时间戳
+// 优化的排序函数：增加了"防崩溃"保护
 const sortRecordsByTime = (records) => {
+  if (!Array.isArray(records)) return [];
+  
   return [...records].sort((a, b) => {
-    // 1. 先按日期排序(降序) - 哪天喝的
+    // 保护：如果有坏数据（缺字段），扔到最后
+    if (!a || !b) return 0;
+    if (!a.dateString && !b.dateString) return 0;
+    if (!a.dateString) return 1;
+    if (!b.dateString) return -1;
+
+    // 1. 先按日期排序(降序)
     if (a.dateString !== b.dateString) {
       return b.dateString.localeCompare(a.dateString);
     }
     
-    // 2. 再按显示时间排序(降序) - 几点喝的
-    // 这必须在 timestamp 之前，否则修改时间后排序不会变
-    const timeA = a.displayTime.split(':').map(Number);
-    const timeB = b.displayTime.split(':').map(Number);
-    const minutesA = timeA[0] * 60 + timeA[1];
-    const minutesB = timeB[0] * 60 + timeB[1];
-    
-    if (minutesA !== minutesB) {
-      return minutesB - minutesA;
+    // 保护：确保 displayTime 存在
+    const timeStrA = a.displayTime || "00:00";
+    const timeStrB = b.displayTime || "00:00";
+
+    // 2. 再按显示时间排序(降序)
+    try {
+      const timeA = timeStrA.split(':').map(Number);
+      const timeB = timeStrB.split(':').map(Number);
+      const minutesA = (timeA[0] || 0) * 60 + (timeA[1] || 0);
+      const minutesB = (timeB[0] || 0) * 60 + (timeB[1] || 0);
+      
+      if (minutesA !== minutesB) {
+        return minutesB - minutesA;
+      }
+    } catch (e) {
+      console.warn('时间解析出错', e);
+      return 0;
     }
 
-    // 3. 最后按创建时间戳兜底(降序) - 同一分钟内，后记的在上面
-    if (a.timestamp && b.timestamp) {
-      return b.timestamp - a.timestamp;
-    }
-
-    return 0;
+    // 3. 最后按创建时间戳兜底
+    const tsA = a.timestamp || 0;
+    const tsB = b.timestamp || 0;
+    return tsB - tsA;
   });
 };
 
 const STORAGE_KEY = 'baby_tracker_local_cache';
 
-// 安全的 Fetch 包装器
 const safeFetch = async (url, options = {}) => {
   try {
-    // 检测是否在预览/Blob环境中
     if (window.location.protocol === 'blob:' || window.location.hostname === '') {
-      console.log('预览环境运行：跳过真实 API 调用，使用本地模拟');
       return { ok: false, status: 0, type: 'preview_mode' };
     }
-    
     const response = await fetch(url, options);
     return response;
   } catch (error) {
-    console.warn('API 调用异常 (已切换至离线/本地模式):', error);
+    console.warn('API error:', error);
     return { ok: false, status: 0, type: 'network_error' };
   }
 };
@@ -68,34 +77,30 @@ export default function BabyMilkTracker() {
   const [showTrendChart, setShowTrendChart] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   
-  // 当前时间状态，用于实时更新"距离上次喂奶"
   const [now, setNow] = useState(new Date());
   
-  // 密码保护
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
-  
-  // 正确的密码
   const CORRECT_PASSWORD = 'mumu';
   
-  // 编辑状态
   const [editingRecord, setEditingRecord] = useState(null);
   const [editAmount, setEditAmount] = useState('');
   const [editTime, setEditTime] = useState('');
 
-  // 删除确认状态 (新增)
   const [deletingId, setDeletingId] = useState(null);
   
-  // 检查是否已验证
   useEffect(() => {
-    const authToken = localStorage.getItem('baby_tracker_auth');
-    if (authToken === 'authenticated') {
-      setIsAuthenticated(true);
+    try {
+      const authToken = localStorage.getItem('baby_tracker_auth');
+      if (authToken === 'authenticated') {
+        setIsAuthenticated(true);
+      }
+    } catch (e) {
+      console.error('LocalStorage 访问受限');
     }
   }, []);
 
-  // 定时器：每30秒更新一次"当前时间"
   useEffect(() => {
     const timer = setInterval(() => {
       setNow(new Date());
@@ -103,25 +108,29 @@ export default function BabyMilkTracker() {
     return () => clearInterval(timer);
   }, []);
 
-  // 从本地缓存加载数据
+  // 从本地缓存加载
   useEffect(() => {
     try {
       const cached = localStorage.getItem(STORAGE_KEY);
       if (cached) {
         const parsed = JSON.parse(cached);
-        setRecords(sortRecordsByTime(parsed));
+        if (Array.isArray(parsed)) {
+          setRecords(sortRecordsByTime(parsed));
+        }
         setLoading(false);
       }
     } catch (e) {
       console.error('读取缓存失败', e);
+      setLoading(false);
     }
   }, []);
   
-  // 验证密码
   const handlePasswordSubmit = (e) => {
     e.preventDefault();
     if (password === CORRECT_PASSWORD) {
-      localStorage.setItem('baby_tracker_auth', 'authenticated');
+      try {
+        localStorage.setItem('baby_tracker_auth', 'authenticated');
+      } catch (e) {}
       setIsAuthenticated(true);
       setPasswordError('');
     } else {
@@ -130,8 +139,9 @@ export default function BabyMilkTracker() {
     }
   };
   
-  // 智能合并数据
   const smartMergeRecords = useCallback((serverList, localList) => {
+    if (!Array.isArray(serverList)) return localList;
+    
     const serverMap = new Map(serverList.map(r => [r.id, r]));
     const nowTs = Date.now();
     const RECENT_THRESHOLD = 5 * 60 * 1000; 
@@ -154,7 +164,6 @@ export default function BabyMilkTracker() {
     return Array.from(serverMap.values());
   }, []);
 
-  // 获取数据
   const fetchRecords = async () => {
     try {
       const timestamp = new Date().getTime();
@@ -171,12 +180,14 @@ export default function BabyMilkTracker() {
         setRecords(prevLocalRecords => {
           const merged = smartMergeRecords(serverData, prevLocalRecords);
           const sorted = sortRecordsByTime(merged);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+          } catch(e) {}
           return sorted;
         });
       }
     } catch (error) {
-      console.error('获取数据流程异常:', error);
+      console.error('获取数据异常', error);
     } finally {
       setLoading(false);
     }
@@ -191,42 +202,58 @@ export default function BabyMilkTracker() {
   }, [isAuthenticated]);
 
   const filteredRecords = useMemo(() => {
-    return records.filter(record => record.dateString === selectedDate);
+    return records.filter(record => record && record.dateString === selectedDate);
   }, [records, selectedDate]);
 
   const totalAmount = useMemo(() => {
-    return filteredRecords.reduce((sum, record) => sum + Number(record.amount), 0);
+    return filteredRecords.reduce((sum, record) => sum + Number(record.amount || 0), 0);
   }, [filteredRecords]);
 
+  // 计算距离上次喂奶 (增强防御版)
   const timeSinceLastFeed = useMemo(() => {
-    if (records.length === 0) return null;
+    if (!records || records.length === 0) return null;
     
     const lastRecord = records[0];
-    const [year, month, day] = lastRecord.dateString.split('-').map(Number);
-    const [hour, minute] = lastRecord.displayTime.split(':').map(Number);
-    const recordDate = new Date(year, month - 1, day, hour, minute);
     
-    const diffInMinutes = Math.floor((now - recordDate) / (1000 * 60));
+    // 防御：如果最新记录缺少必要字段，跳过
+    if (!lastRecord || !lastRecord.dateString || !lastRecord.displayTime) return '数据不全';
     
-    if (diffInMinutes < 0) return '时间设定在未来'; 
-    if (diffInMinutes < 1) return '刚刚';
-    
-    const hours = Math.floor(diffInMinutes / 60);
-    const minutes = diffInMinutes % 60;
-    
-    if (hours === 0) return `${minutes}分钟前`;
-    if (hours > 24) {
-        const days = Math.floor(hours / 24);
-        return `${days}天前`;
+    try {
+      const [year, month, day] = lastRecord.dateString.split('-').map(Number);
+      const [hour, minute] = lastRecord.displayTime.split(':').map(Number);
+      
+      // 使用更稳健的日期构造方式
+      const recordDate = new Date(year, month - 1, day, hour, minute);
+      
+      // 检查日期是否有效
+      if (isNaN(recordDate.getTime())) return '时间无效';
+      
+      const diffInMinutes = Math.floor((now - recordDate) / (1000 * 60));
+      
+      if (diffInMinutes < 0) return '时间设定在未来'; 
+      if (diffInMinutes < 1) return '刚刚';
+      
+      const hours = Math.floor(diffInMinutes / 60);
+      const minutes = diffInMinutes % 60;
+      
+      if (hours === 0) return `${minutes}分钟前`;
+      if (hours > 24) {
+          const days = Math.floor(hours / 24);
+          return `${days}天前`;
+      }
+      return `${hours}小时 ${minutes}分钟前`;
+    } catch (e) {
+      console.error('计算时间差出错', e);
+      return '计算出错';
     }
-    return `${hours}小时 ${minutes}分钟前`;
   }, [records, now]);
 
   const dailyStats = useMemo(() => {
     const stats = {};
     records.forEach(record => {
+      if (!record || !record.dateString) return;
       const date = record.dateString;
-      stats[date] = (stats[date] || 0) + Number(record.amount);
+      stats[date] = (stats[date] || 0) + Number(record.amount || 0);
     });
     
     return Object.entries(stats)
@@ -239,17 +266,23 @@ export default function BabyMilkTracker() {
     const today = new Date();
     
     for (let i = 14; i >= 0; i--) {
+      // Safari 兼容的日期操作
       const date = new Date(today);
       date.setDate(date.getDate() - i);
-      const dateString = date.toISOString().split('T')[0];
+      
+      // 手动构建 YYYY-MM-DD，避免时区问题
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      const dateString = `${y}-${m}-${d}`;
       
       const dayTotal = records
-        .filter(r => r.dateString === dateString)
-        .reduce((sum, r) => sum + Number(r.amount), 0);
+        .filter(r => r && r.dateString === dateString)
+        .reduce((sum, r) => sum + Number(r.amount || 0), 0);
       
       last15Days.push({
         date: dateString,
-        shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
+        shortDate: `${Number(m)}/${Number(d)}`,
         total: dayTotal
       });
     }
@@ -281,7 +314,12 @@ export default function BabyMilkTracker() {
     
     setIsSubmitting(true);
     const nowTime = new Date();
-    const todayString = nowTime.toISOString().split('T')[0];
+    // 构造本地日期字符串
+    const y = nowTime.getFullYear();
+    const m = String(nowTime.getMonth() + 1).padStart(2, '0');
+    const d = String(nowTime.getDate()).padStart(2, '0');
+    const todayString = `${y}-${m}-${d}`;
+
     const timestamp = Date.now();
     
     const newRecord = {
@@ -296,7 +334,9 @@ export default function BabyMilkTracker() {
     try {
       setRecords(prevRecords => {
         const newRecords = sortRecordsByTime([...prevRecords, newRecord]);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(newRecords));
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(newRecords));
+        } catch(e){}
         return newRecords;
       });
       
@@ -314,8 +354,6 @@ export default function BabyMilkTracker() {
       
       if (response && response.ok) {
         setTimeout(() => fetchRecords(), 5000);
-      } else {
-        console.log('后端同步失败，但已保存到本地');
       }
     } catch (error) {
       console.error('添加记录异常:', error);
@@ -325,11 +363,10 @@ export default function BabyMilkTracker() {
   };
 
   const startEdit = (record) => {
-    // 互斥：如果正在删除，先取消删除
     if (deletingId) setDeletingId(null);
     setEditingRecord(record.id);
-    setEditAmount(record.amount.toString());
-    setEditTime(record.displayTime);
+    setEditAmount((record.amount || '').toString());
+    setEditTime(record.displayTime || '');
   };
 
   const cancelEdit = () => {
@@ -353,7 +390,9 @@ export default function BabyMilkTracker() {
     setRecords(prev => {
       const updated = prev.map(r => r.id === record.id ? updatedRecord : r);
       const sorted = sortRecordsByTime(updated);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+      } catch(e){}
       return sorted;
     });
     
@@ -373,8 +412,6 @@ export default function BabyMilkTracker() {
       
       if (createResponse && createResponse.ok) {
         setTimeout(() => fetchRecords(), 5000);
-      } else {
-         console.log('后端同步失败，保留本地修改');
       }
     } catch (error) {
       console.error('编辑同步失败:', error);
@@ -382,26 +419,23 @@ export default function BabyMilkTracker() {
     }
   };
 
-  // 请求删除（显示确认UI）
   const requestDelete = (id) => {
-    // 互斥：如果正在编辑，先取消编辑
     if (editingRecord) setEditingRecord(null);
     setDeletingId(id);
   };
 
-  // 取消删除
   const cancelDelete = () => {
     setDeletingId(null);
   };
 
-  // 确认删除（实际执行）
   const confirmDelete = async (id) => {
-    setDeletingId(null); // 关闭确认框
+    setDeletingId(null);
     
-    // 立即本地删除
     setRecords(prev => {
       const updated = prev.filter(r => r.id !== id);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      } catch(e){}
       return updated;
     });
     
@@ -412,8 +446,6 @@ export default function BabyMilkTracker() {
       
       if (response && response.ok) {
         setTimeout(() => fetchRecords(), 5000);
-      } else {
-        console.log('删除同步失败，保留本地状态');
       }
     } catch (error) {
       console.error('删除同步失败:', error);
@@ -421,10 +453,27 @@ export default function BabyMilkTracker() {
     }
   };
 
+  // 修复 Safari 日期切换问题：手动计算日期
   const changeDate = (offset) => {
-    const date = new Date(selectedDate);
-    date.setDate(date.getDate() + offset);
-    setSelectedDate(date.toISOString().split('T')[0]);
+    try {
+      // 解析当前选中日期的年、月、日
+      const [currYear, currMonth, currDay] = selectedDate.split('-').map(Number);
+      
+      // 创建本地日期对象（注意月份要减1）
+      const date = new Date(currYear, currMonth - 1, currDay);
+      
+      // 增加/减少天数
+      date.setDate(date.getDate() + offset);
+      
+      // 格式化回 YYYY-MM-DD
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      
+      setSelectedDate(`${y}-${m}-${d}`);
+    } catch(e) {
+      console.error('切换日期出错', e);
+    }
   };
 
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
@@ -474,6 +523,7 @@ export default function BabyMilkTracker() {
     );
   }
 
+  // 加载状态只有在没有记录时才显示
   if (loading && records.length === 0) {
     return (
       <div className="min-h-screen bg-rose-50 flex items-center justify-center">
