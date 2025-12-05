@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, TrendingUp } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, TrendingUp, Timer, AlertCircle } from 'lucide-react';
 
 // 注册 Service Worker
 if ('serviceWorker' in navigator) {
@@ -10,20 +10,52 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// 统一的排序函数
+// 优化的排序函数：修复了编辑时间后排序不更新的问题
+// 新逻辑：日期 -> 显示时间(HH:mm) -> 创建时间戳
 const sortRecordsByTime = (records) => {
   return [...records].sort((a, b) => {
-    // 先按日期排序(降序)
+    // 1. 先按日期排序(降序) - 哪天喝的
     if (a.dateString !== b.dateString) {
       return b.dateString.localeCompare(a.dateString);
     }
-    // 同一天,按显示时间排序(降序)
+    
+    // 2. 再按显示时间排序(降序) - 几点喝的
+    // 这必须在 timestamp 之前，否则修改时间后排序不会变
     const timeA = a.displayTime.split(':').map(Number);
     const timeB = b.displayTime.split(':').map(Number);
     const minutesA = timeA[0] * 60 + timeA[1];
     const minutesB = timeB[0] * 60 + timeB[1];
-    return minutesB - minutesA;
+    
+    if (minutesA !== minutesB) {
+      return minutesB - minutesA;
+    }
+
+    // 3. 最后按创建时间戳兜底(降序) - 同一分钟内，后记的在上面
+    if (a.timestamp && b.timestamp) {
+      return b.timestamp - a.timestamp;
+    }
+
+    return 0;
   });
+};
+
+const STORAGE_KEY = 'baby_tracker_local_cache';
+
+// 安全的 Fetch 包装器
+const safeFetch = async (url, options = {}) => {
+  try {
+    // 检测是否在预览/Blob环境中
+    if (window.location.protocol === 'blob:' || window.location.hostname === '') {
+      console.log('预览环境运行：跳过真实 API 调用，使用本地模拟');
+      return { ok: false, status: 0, type: 'preview_mode' };
+    }
+    
+    const response = await fetch(url, options);
+    return response;
+  } catch (error) {
+    console.warn('API 调用异常 (已切换至离线/本地模式):', error);
+    return { ok: false, status: 0, type: 'network_error' };
+  }
 };
 
 export default function BabyMilkTracker() {
@@ -35,6 +67,9 @@ export default function BabyMilkTracker() {
   const [showStats, setShowStats] = useState(false);
   const [showTrendChart, setShowTrendChart] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
+  
+  // 当前时间状态，用于实时更新"距离上次喂奶"
+  const [now, setNow] = useState(new Date());
   
   // 密码保护
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -48,12 +83,37 @@ export default function BabyMilkTracker() {
   const [editingRecord, setEditingRecord] = useState(null);
   const [editAmount, setEditAmount] = useState('');
   const [editTime, setEditTime] = useState('');
+
+  // 删除确认状态 (新增)
+  const [deletingId, setDeletingId] = useState(null);
   
   // 检查是否已验证
   useEffect(() => {
     const authToken = localStorage.getItem('baby_tracker_auth');
     if (authToken === 'authenticated') {
       setIsAuthenticated(true);
+    }
+  }, []);
+
+  // 定时器：每30秒更新一次"当前时间"
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 从本地缓存加载数据
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem(STORAGE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        setRecords(sortRecordsByTime(parsed));
+        setLoading(false);
+      }
+    } catch (e) {
+      console.error('读取缓存失败', e);
     }
   }, []);
   
@@ -70,11 +130,35 @@ export default function BabyMilkTracker() {
     }
   };
   
+  // 智能合并数据
+  const smartMergeRecords = useCallback((serverList, localList) => {
+    const serverMap = new Map(serverList.map(r => [r.id, r]));
+    const nowTs = Date.now();
+    const RECENT_THRESHOLD = 5 * 60 * 1000; 
+
+    localList.forEach(local => {
+      if (local.updatedAt && (nowTs - local.updatedAt < RECENT_THRESHOLD)) {
+        const serverRecord = serverMap.get(local.id);
+        
+        if (!serverRecord) {
+          serverMap.set(local.id, local);
+        } else {
+          const serverTime = serverRecord.updatedAt || 0;
+          if (local.updatedAt > serverTime) {
+            serverMap.set(local.id, local);
+          }
+        }
+      }
+    });
+
+    return Array.from(serverMap.values());
+  }, []);
+
   // 获取数据
   const fetchRecords = async () => {
     try {
       const timestamp = new Date().getTime();
-      const response = await fetch(`/api/records?_t=${timestamp}`, {
+      const response = await safeFetch(`/api/records?_t=${timestamp}`, {
         cache: 'no-store',
         headers: {
           'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -82,36 +166,62 @@ export default function BabyMilkTracker() {
         }
       });
       
-      if (response.ok) {
-        const data = await response.json();
-        setRecords(sortRecordsByTime(data));
+      if (response && response.ok) {
+        const serverData = await response.json();
+        setRecords(prevLocalRecords => {
+          const merged = smartMergeRecords(serverData, prevLocalRecords);
+          const sorted = sortRecordsByTime(merged);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+          return sorted;
+        });
       }
     } catch (error) {
-      console.error('获取数据失败:', error);
+      console.error('获取数据流程异常:', error);
     } finally {
       setLoading(false);
     }
   };
 
-  // 初始加载数据
   useEffect(() => {
-    fetchRecords();
-    // 定期同步(60秒)
-    const interval = setInterval(() => fetchRecords(), 60000);
-    return () => clearInterval(interval);
-  }, []);
+    if (isAuthenticated) {
+      fetchRecords();
+      const interval = setInterval(() => fetchRecords(), 60000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated]);
 
-  // 过滤记录(使用已排序的records)
   const filteredRecords = useMemo(() => {
     return records.filter(record => record.dateString === selectedDate);
   }, [records, selectedDate]);
 
-  // 计算总量
   const totalAmount = useMemo(() => {
     return filteredRecords.reduce((sum, record) => sum + Number(record.amount), 0);
   }, [filteredRecords]);
 
-  // 每日统计
+  const timeSinceLastFeed = useMemo(() => {
+    if (records.length === 0) return null;
+    
+    const lastRecord = records[0];
+    const [year, month, day] = lastRecord.dateString.split('-').map(Number);
+    const [hour, minute] = lastRecord.displayTime.split(':').map(Number);
+    const recordDate = new Date(year, month - 1, day, hour, minute);
+    
+    const diffInMinutes = Math.floor((now - recordDate) / (1000 * 60));
+    
+    if (diffInMinutes < 0) return '时间设定在未来'; 
+    if (diffInMinutes < 1) return '刚刚';
+    
+    const hours = Math.floor(diffInMinutes / 60);
+    const minutes = diffInMinutes % 60;
+    
+    if (hours === 0) return `${minutes}分钟前`;
+    if (hours > 24) {
+        const days = Math.floor(hours / 24);
+        return `${days}天前`;
+    }
+    return `${hours}小时 ${minutes}分钟前`;
+  }, [records, now]);
+
   const dailyStats = useMemo(() => {
     const stats = {};
     records.forEach(record => {
@@ -124,7 +234,6 @@ export default function BabyMilkTracker() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [records]);
 
-  // 趋势数据(过去15天)
   const trendData = useMemo(() => {
     const last15Days = [];
     const today = new Date();
@@ -148,7 +257,6 @@ export default function BabyMilkTracker() {
     return last15Days;
   }, [records]);
 
-  // 计算趋势统计
   const trendStats = useMemo(() => {
     const totals = trendData.map(d => d.total).filter(t => t > 0);
     if (totals.length === 0) return { avg: 0, max: 0, min: 0 };
@@ -160,7 +268,6 @@ export default function BabyMilkTracker() {
     };
   }, [trendData]);
 
-  // 显示成功提示
   const showSuccess = () => {
     setShowSuccessToast(true);
     setTimeout(() => {
@@ -168,164 +275,152 @@ export default function BabyMilkTracker() {
     }, 2000);
   };
 
-  // 添加记录
   const handleAddRecord = async (e) => {
     e.preventDefault();
     if (!amount) return;
     
     setIsSubmitting(true);
-    const now = new Date();
-    const todayString = new Date().toISOString().split('T')[0];
+    const nowTime = new Date();
+    const todayString = nowTime.toISOString().split('T')[0];
+    const timestamp = Date.now();
     
     const newRecord = {
-      id: `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `temp_${timestamp}_${Math.random().toString(36).substr(2, 9)}`,
       amount: Number(amount),
-      timestamp: Date.now(),
+      timestamp: timestamp,
+      updatedAt: timestamp,
       dateString: todayString,
-      displayTime: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+      displayTime: nowTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     };
     
     try {
-      // 立即添加到本地状态并排序
-      setRecords(prevRecords => sortRecordsByTime([...prevRecords, newRecord]));
+      setRecords(prevRecords => {
+        const newRecords = sortRecordsByTime([...prevRecords, newRecord]);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(newRecords));
+        return newRecords;
+      });
+      
       setAmount('');
       if (selectedDate !== todayString) {
         setSelectedDate(todayString);
       }
-      
       showSuccess();
       
-      // 提交到服务器
-      const response = await fetch('/api/records', {
+      const response = await safeFetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount: newRecord.amount,
-          timestamp: newRecord.timestamp,
-          dateString: newRecord.dateString,
-          displayTime: newRecord.displayTime
-        })
+        body: JSON.stringify(newRecord)
       });
       
-      if (response.ok) {
-        // 10秒后重新获取所有数据,替换临时记录
-        setTimeout(() => {
-          fetchRecords();
-        }, 10000);
+      if (response && response.ok) {
+        setTimeout(() => fetchRecords(), 5000);
       } else {
-        // 失败则移除临时记录
-        setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
-        alert('添加失败，请重试');
+        console.log('后端同步失败，但已保存到本地');
       }
     } catch (error) {
-      console.error('添加记录失败:', error);
-      setRecords(prevRecords => prevRecords.filter(r => r.id !== newRecord.id));
-      alert('添加失败，请重试');
+      console.error('添加记录异常:', error);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // 开始编辑
   const startEdit = (record) => {
+    // 互斥：如果正在删除，先取消删除
+    if (deletingId) setDeletingId(null);
     setEditingRecord(record.id);
     setEditAmount(record.amount.toString());
     setEditTime(record.displayTime);
   };
 
-  // 取消编辑
   const cancelEdit = () => {
     setEditingRecord(null);
     setEditAmount('');
     setEditTime('');
   };
 
-  // 保存编辑
   const saveEdit = async (record) => {
     if (!editAmount || !editTime) return;
     
-    const originalRecords = [...records];
+    const timestamp = Date.now();
     
-    // 创建更新后的记录
     const updatedRecord = {
       ...record,
       amount: Number(editAmount),
-      displayTime: editTime
+      displayTime: editTime,
+      updatedAt: timestamp
     };
     
-    // 立即更新本地状态并重新排序
-    const updatedRecords = records.map(r => r.id === record.id ? updatedRecord : r);
-    setRecords(sortRecordsByTime(updatedRecords));
+    setRecords(prev => {
+      const updated = prev.map(r => r.id === record.id ? updatedRecord : r);
+      const sorted = sortRecordsByTime(updated);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+      return sorted;
+    });
     
     cancelEdit();
     showSuccess();
     
     try {
-      // 先删除旧记录
-      const deleteResponse = await fetch(`/api/records?id=${record.id}`, { 
+      const deleteResponse = await safeFetch(`/api/records?id=${record.id}`, { 
         method: 'DELETE' 
       });
       
-      if (!deleteResponse.ok) throw new Error('删除失败');
-      
-      // 再创建新记录
-      const createResponse = await fetch('/api/records', {
+      const createResponse = await safeFetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount: updatedRecord.amount,
-          timestamp: record.timestamp,
-          dateString: record.dateString,
-          displayTime: updatedRecord.displayTime
-        })
+        body: JSON.stringify(updatedRecord)
       });
       
-      if (!createResponse.ok) throw new Error('创建失败');
-      
-      // 10秒后同步服务器数据
-      setTimeout(() => {
-        fetchRecords();
-      }, 10000);
+      if (createResponse && createResponse.ok) {
+        setTimeout(() => fetchRecords(), 5000);
+      } else {
+         console.log('后端同步失败，保留本地修改');
+      }
     } catch (error) {
-      console.error('编辑失败:', error);
-      setRecords(sortRecordsByTime(originalRecords));
-      alert('编辑失败，请重试');
+      console.error('编辑同步失败:', error);
+      alert('已保存到本地（网络同步失败）');
     }
   };
 
-  // 删除记录
-  const handleDelete = async (id) => {
-    if (!confirm('确定要删除这条记录吗？')) return;
+  // 请求删除（显示确认UI）
+  const requestDelete = (id) => {
+    // 互斥：如果正在编辑，先取消编辑
+    if (editingRecord) setEditingRecord(null);
+    setDeletingId(id);
+  };
+
+  // 取消删除
+  const cancelDelete = () => {
+    setDeletingId(null);
+  };
+
+  // 确认删除（实际执行）
+  const confirmDelete = async (id) => {
+    setDeletingId(null); // 关闭确认框
     
-    const originalRecords = [...records];
-    
-    // 立即从本地删除并重新排序
-    const updatedRecords = records.filter(r => r.id !== id);
-    setRecords(sortRecordsByTime(updatedRecords));
+    // 立即本地删除
+    setRecords(prev => {
+      const updated = prev.filter(r => r.id !== id);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      return updated;
+    });
     
     try {
-      const response = await fetch(`/api/records?id=${id}`, {
+      const response = await safeFetch(`/api/records?id=${id}`, {
         method: 'DELETE'
       });
       
-      if (response.ok) {
-        // 10秒后同步服务器数据
-        setTimeout(() => {
-          fetchRecords();
-        }, 10000);
+      if (response && response.ok) {
+        setTimeout(() => fetchRecords(), 5000);
       } else {
-        // 失败则恢复
-        setRecords(sortRecordsByTime(originalRecords));
-        alert('删除失败，请重试');
+        console.log('删除同步失败，保留本地状态');
       }
     } catch (error) {
-      console.error('删除失败:', error);
-      setRecords(sortRecordsByTime(originalRecords));
-      alert('删除失败，请重试');
+      console.error('删除同步失败:', error);
+      alert('已在本地删除（网络同步失败）');
     }
   };
 
-  // 切换日期
   const changeDate = (offset) => {
     const date = new Date(selectedDate);
     date.setDate(date.getDate() + offset);
@@ -334,7 +429,6 @@ export default function BabyMilkTracker() {
 
   const isToday = selectedDate === new Date().toISOString().split('T')[0];
 
-  // 如果未验证，显示密码输入页面
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-rose-50 flex items-center justify-center p-4">
@@ -375,16 +469,12 @@ export default function BabyMilkTracker() {
               确认
             </button>
           </div>
-          
-          <div className="mt-6 text-center text-xs text-gray-400">
-            首次在此设备访问需要验证密码
-          </div>
         </div>
       </div>
     );
   }
 
-  if (loading) {
+  if (loading && records.length === 0) {
     return (
       <div className="min-h-screen bg-rose-50 flex items-center justify-center">
         <div className="text-rose-400 animate-pulse flex flex-col items-center">
@@ -466,17 +556,32 @@ export default function BabyMilkTracker() {
 
         {/* Daily Summary Card */}
         <div className="bg-gradient-to-br from-rose-400 to-rose-500 rounded-3xl p-6 text-white shadow-lg shadow-rose-200">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-rose-100 font-medium text-sm flex items-center gap-2">
-              <Droplets size={16} />
-              {isToday ? '今日总量' : '当日总量'}
-            </h2>
-          </div>
-          <div className="text-5xl font-bold tracking-tight mb-1">
-            {totalAmount}<span className="text-2xl font-normal opacity-80 ml-1">ml</span>
-          </div>
-          <div className="text-rose-100 text-sm">
-            共喂奶 {filteredRecords.length} 次
+          <div className="flex flex-col gap-4">
+            {/* 距离上次喂奶时间 - 放在最显眼的位置 */}
+            <div className="bg-white/20 backdrop-blur-sm rounded-xl p-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-rose-50 font-medium text-sm">
+                <Timer size={16} />
+                <span>距离上次喂奶</span>
+              </div>
+              <div className="font-bold text-lg">
+                {timeSinceLastFeed || '暂无数据'}
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-rose-100 font-medium text-sm flex items-center gap-2">
+                  <Droplets size={16} />
+                  {isToday ? '今日总量' : '当日总量'}
+                </h2>
+              </div>
+              <div className="text-5xl font-bold tracking-tight mb-1">
+                {totalAmount}<span className="text-2xl font-normal opacity-80 ml-1">ml</span>
+              </div>
+              <div className="text-rose-100 text-sm">
+                共喂奶 {filteredRecords.length} 次
+              </div>
+            </div>
           </div>
         </div>
 
@@ -548,7 +653,7 @@ export default function BabyMilkTracker() {
           ) : (
             <div className="space-y-3">
               {filteredRecords.map((record) => (
-                <div key={record.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between group">
+                <div key={record.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between group transition-all duration-200">
                   {editingRecord === record.id ? (
                     // 编辑模式
                     <div className="flex-1 flex items-center gap-3 flex-wrap">
@@ -578,8 +683,30 @@ export default function BabyMilkTracker() {
                         取消
                       </button>
                     </div>
+                  ) : deletingId === record.id ? (
+                    // 删除确认模式
+                    <div className="flex-1 flex items-center justify-between animate-in fade-in slide-in-from-right-5 duration-200">
+                      <div className="flex items-center gap-2 text-red-500 font-medium">
+                        <AlertCircle size={20} />
+                        <span>确认删除这条记录?</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => confirmDelete(record.id)}
+                          className="px-4 py-2 bg-red-500 text-white rounded-lg text-sm font-bold hover:bg-red-600 shadow-sm transition active:scale-95"
+                        >
+                          删除
+                        </button>
+                        <button
+                          onClick={cancelDelete}
+                          className="px-4 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-200 transition active:scale-95"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
                   ) : (
-                    // 显示模式
+                    // 正常显示模式
                     <>
                       <div className="flex items-center gap-4">
                         <div className="bg-blue-50 text-blue-500 p-2.5 rounded-xl">
@@ -598,14 +725,14 @@ export default function BabyMilkTracker() {
                       <div className="flex items-center gap-2">
                         <button 
                           onClick={() => startEdit(record)}
-                          className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition"
+                          className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition active:scale-95"
                           aria-label="Edit"
                         >
                           <Edit2 size={18} />
                         </button>
                         <button 
-                          onClick={() => handleDelete(record.id)}
-                          className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition"
+                          onClick={() => requestDelete(record.id)}
+                          className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition active:scale-95"
                           aria-label="Delete"
                         >
                           <Trash2 size={18} />
@@ -624,7 +751,6 @@ export default function BabyMilkTracker() {
       {showTrendChart && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white w-full max-w-2xl rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200">
-            {/* Modal Header */}
             <div className="p-4 border-b border-gray-100 flex items-center justify-between shrink-0">
               <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
                 <TrendingUp className="text-purple-500" size={20} />
@@ -638,9 +764,7 @@ export default function BabyMilkTracker() {
               </button>
             </div>
 
-            {/* Modal Body */}
             <div className="flex-1 overflow-y-auto p-6">
-              {/* 统计卡片 */}
               <div className="grid grid-cols-3 gap-3 mb-6">
                 <div className="bg-blue-50 rounded-xl p-4">
                   <div className="text-xs text-blue-600 font-medium mb-1">平均每日</div>
@@ -656,10 +780,8 @@ export default function BabyMilkTracker() {
                 </div>
               </div>
 
-              {/* 折线图 */}
               <div className="bg-gray-50 rounded-2xl p-4">
                 <div className="relative h-72">
-                  {/* Y轴标签 */}
                   <div className="absolute left-0 top-0 bottom-8 w-10 flex flex-col justify-between text-xs text-gray-500 text-right pr-1">
                     <span>1500</span>
                     <span>1200</span>
@@ -669,16 +791,13 @@ export default function BabyMilkTracker() {
                     <span>0</span>
                   </div>
                   
-                  {/* 图表区域 */}
                   <div className="ml-11 h-full relative pb-8">
-                    {/* 网格线 */}
                     <div className="absolute inset-0 bottom-8 flex flex-col justify-between">
                       {[0, 1, 2, 3, 4, 5].map(i => (
                         <div key={i} className="border-t border-gray-200"></div>
                       ))}
                     </div>
                     
-                    {/* 折线 */}
                     <svg className="absolute w-full h-full bottom-8" style={{ left: '10px', right: '10px', overflow: 'visible' }} viewBox="0 0 100 100" preserveAspectRatio="none">
                       <path
                         d={trendData.map((d, i) => {
@@ -693,7 +812,6 @@ export default function BabyMilkTracker() {
                       />
                     </svg>
                     
-                    {/* 数据点 */}
                     <div className="absolute w-full h-full bottom-8" style={{ left: '10px', right: '10px' }}>
                       {trendData.map((d, i) => {
                         const xPercent = (i / (trendData.length - 1)) * 100;
@@ -710,18 +828,15 @@ export default function BabyMilkTracker() {
                               transform: 'translate(-50%, -50%)'
                             }}
                           >
-                            {/* 今天的外圈 */}
                             {isTodayDate && (
                               <div className="absolute inset-0 w-5 h-5 rounded-full border-2 border-rose-400 -translate-x-1/2 -translate-y-1/2" style={{ left: '50%', top: '50%' }}></div>
                             )}
-                            {/* 圆点 */}
                             <div className="w-3 h-3 rounded-full bg-white border-2 border-rose-400"></div>
                           </div>
                         );
                       })}
                     </div>
                     
-                    {/* X轴标签 */}
                     <div className="absolute bottom-0 left-0 right-0 flex justify-between text-xs text-gray-500">
                       <span>{trendData[0]?.shortDate}</span>
                       <span>{trendData[Math.floor(trendData.length / 2)]?.shortDate}</span>
@@ -730,8 +845,7 @@ export default function BabyMilkTracker() {
                   </div>
                 </div>
               </div>
-
-              {/* 说明 */}
+              
               <div className="mt-4 text-sm text-gray-500 text-center">
                 显示最近15天的每日总摄入量趋势
               </div>
