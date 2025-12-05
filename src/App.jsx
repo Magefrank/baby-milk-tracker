@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, TrendingUp, Timer, AlertCircle } from 'lucide-react';
+import { Trash2, Plus, Calendar, Baby, Droplets, Clock, History, BarChart3, X, Check, Edit2, TrendingUp, Timer, AlertCircle, Moon, Sun, Download, Pill } from 'lucide-react';
 
 // 注册 Service Worker
 if ('serviceWorker' in navigator) {
@@ -53,6 +53,7 @@ const sortRecordsByTime = (records) => {
 };
 
 const STORAGE_KEY = 'baby_tracker_local_cache';
+const D3_STORAGE_KEY_PREFIX = 'baby_tracker_d3_';
 
 const safeFetch = async (url, options = {}) => {
   try {
@@ -77,6 +78,12 @@ export default function BabyMilkTracker() {
   const [showTrendChart, setShowTrendChart] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   
+  // 深色模式
+  const [darkMode, setDarkMode] = useState(false);
+  
+  // D3 状态 (现在会从后端同步)
+  const [d3Status, setD3Status] = useState([false, false]);
+  
   const [now, setNow] = useState(new Date());
   
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -90,15 +97,117 @@ export default function BabyMilkTracker() {
 
   const [deletingId, setDeletingId] = useState(null);
   
+  // 初始化深色模式
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark') {
+      setDarkMode(true);
+      document.documentElement.classList.add('dark');
+    } else {
+      setDarkMode(false);
+      document.documentElement.classList.remove('dark');
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    const newMode = !darkMode;
+    setDarkMode(newMode);
+    if (newMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  };
+
+  // --- D3 相关逻辑 ---
+
+  // 1. 从后端获取 D3 状态
+  const fetchD3Status = async (date) => {
+    try {
+      const response = await safeFetch(`/api/records?type=d3&date=${date}`);
+      if (response && response.ok) {
+        const data = await response.json();
+        if (data && Array.isArray(data.status)) {
+          setD3Status(data.status);
+          // 顺便更新本地缓存做备份
+          localStorage.setItem(`${D3_STORAGE_KEY_PREFIX}${date}`, JSON.stringify(data.status));
+        }
+      } else {
+        // 如果后端失败（比如断网），降级读取本地缓存
+        const saved = localStorage.getItem(`${D3_STORAGE_KEY_PREFIX}${date}`);
+        if (saved) setD3Status(JSON.parse(saved));
+        else setD3Status([false, false]);
+      }
+    } catch (e) {
+      console.error('Fetch D3 error', e);
+    }
+  };
+
+  // 2. 监听日期变化，加载对应日期的 D3
+  useEffect(() => {
+    fetchD3Status(selectedDate);
+  }, [selectedDate]);
+
+  // 3. 切换状态并保存到后端
+  const toggleD3 = async (index) => {
+    const newStatus = [...d3Status];
+    newStatus[index] = !newStatus[index];
+    
+    // 立即更新 UI (Optimistic Update)
+    setD3Status(newStatus);
+    
+    // 更新本地缓存
+    localStorage.setItem(`${D3_STORAGE_KEY_PREFIX}${selectedDate}`, JSON.stringify(newStatus));
+    
+    // 发送到后端
+    try {
+      await safeFetch('/api/records', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'd3', // 告诉后端这是 D3 数据
+          dateString: selectedDate,
+          status: newStatus
+        })
+      });
+    } catch (e) {
+      console.error('Save D3 error', e);
+    }
+  };
+
+  // 导出 CSV
+  const handleExport = () => {
+    if (records.length === 0) {
+      alert('暂无数据可导出');
+      return;
+    }
+
+    const headers = ['日期,时间,奶量(ml),时间戳'];
+    const rows = records.map(r => 
+      `${r.dateString},${r.displayTime},${r.amount},${new Date(r.timestamp).toLocaleString()}`
+    );
+
+    const csvContent = "\uFEFF" + [headers, ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `沐沐喝奶记录_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   useEffect(() => {
     try {
       const authToken = localStorage.getItem('baby_tracker_auth');
       if (authToken === 'authenticated') {
         setIsAuthenticated(true);
       }
-    } catch (e) {
-      console.error('LocalStorage 访问受限');
-    }
+    } catch (e) {}
   }, []);
 
   useEffect(() => {
@@ -108,7 +217,7 @@ export default function BabyMilkTracker() {
     return () => clearInterval(timer);
   }, []);
 
-  // 从本地缓存加载
+  // 从本地缓存加载喝奶记录
   useEffect(() => {
     try {
       const cached = localStorage.getItem(STORAGE_KEY);
@@ -120,7 +229,6 @@ export default function BabyMilkTracker() {
         setLoading(false);
       }
     } catch (e) {
-      console.error('读取缓存失败', e);
       setLoading(false);
     }
   }, []);
@@ -214,8 +322,6 @@ export default function BabyMilkTracker() {
     if (!records || records.length === 0) return null;
     
     const lastRecord = records[0];
-    
-    // 防御：如果最新记录缺少必要字段，跳过
     if (!lastRecord || !lastRecord.dateString || !lastRecord.displayTime) return '数据不全';
     
     try {
@@ -526,17 +632,17 @@ export default function BabyMilkTracker() {
   // 加载状态只有在没有记录时才显示
   if (loading && records.length === 0) {
     return (
-      <div className="min-h-screen bg-rose-50 flex items-center justify-center">
+      <div className="min-h-screen bg-rose-50 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-rose-400 animate-pulse flex flex-col items-center">
           <Baby size={48} />
-          <p className="mt-4 font-medium">正在加载数据...</p>
+          <p className="mt-4 font-medium dark:text-gray-300">正在加载数据...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-rose-50 font-sans text-gray-800 pb-20 relative">
+    <div className={`min-h-screen font-sans pb-20 relative transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-gray-100' : 'bg-rose-50 text-gray-800'}`}>
       {/* Success Toast */}
       {showSuccessToast && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-5 duration-300">
@@ -550,28 +656,41 @@ export default function BabyMilkTracker() {
       )}
 
       {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
+      <header className={`${darkMode ? 'bg-gray-800 shadow-gray-900' : 'bg-white shadow-sm'} sticky top-0 z-10 transition-colors duration-300`}>
         <div className="max-w-md mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="bg-rose-100 p-2 rounded-full text-rose-500">
+            <div className={`${darkMode ? 'bg-gray-700 text-rose-400' : 'bg-rose-100 text-rose-500'} p-2 rounded-full transition-colors`}>
               <Baby size={24} />
             </div>
-            <h1 className="text-xl font-bold text-gray-800">沐沐喝奶记</h1>
+            <h1 className={`text-xl font-bold ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>沐沐喝奶记</h1>
           </div>
           <div className="flex items-center gap-2">
+            {/* 深色模式开关 */}
+            <button 
+              onClick={toggleTheme}
+              className={`p-2 rounded-xl transition ${darkMode ? 'bg-gray-700 text-yellow-400' : 'bg-gray-50 text-gray-500'}`}
+            >
+              {darkMode ? <Sun size={20} /> : <Moon size={20} />}
+            </button>
+            {/* 导出按钮 */}
+            <button 
+              onClick={handleExport}
+              className={`p-2 rounded-xl transition ${darkMode ? 'bg-gray-700 text-blue-400' : 'bg-gray-50 text-blue-500'}`}
+              title="导出CSV"
+            >
+              <Download size={20} />
+            </button>
             <button 
               onClick={() => setShowTrendChart(true)}
-              className="p-2 bg-gray-50 text-gray-600 rounded-xl hover:bg-purple-50 hover:text-purple-500 transition active:scale-95 flex items-center gap-1 text-sm font-medium"
+              className={`p-2 rounded-xl transition active:scale-95 flex items-center gap-1 text-sm font-medium ${darkMode ? 'bg-gray-700 text-purple-400' : 'bg-gray-50 text-gray-600 hover:bg-purple-50 hover:text-purple-500'}`}
             >
               <TrendingUp size={20} />
-              <span className="hidden sm:inline">趋势</span>
             </button>
             <button 
               onClick={() => setShowStats(true)}
-              className="p-2 bg-gray-50 text-gray-600 rounded-xl hover:bg-rose-50 hover:text-rose-500 transition active:scale-95 flex items-center gap-1 text-sm font-medium"
+              className={`p-2 rounded-xl transition active:scale-95 flex items-center gap-1 text-sm font-medium ${darkMode ? 'bg-gray-700 text-rose-400' : 'bg-gray-50 text-gray-600 hover:bg-rose-50 hover:text-rose-500'}`}
             >
               <BarChart3 size={20} />
-              <span className="hidden sm:inline">统计</span>
             </button>
           </div>
         </div>
@@ -581,15 +700,15 @@ export default function BabyMilkTracker() {
       <main className="max-w-md mx-auto px-4 py-6 space-y-6">
         
         {/* Date Navigator */}
-        <div className="flex items-center justify-between bg-white p-3 rounded-2xl shadow-sm">
+        <div className={`flex items-center justify-between p-3 rounded-2xl shadow-sm transition-colors duration-300 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
           <button 
             onClick={() => changeDate(-1)}
-            className="p-2 hover:bg-gray-100 rounded-full text-gray-500 active:scale-95 transition"
+            className={`p-2 rounded-full active:scale-95 transition ${darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}
           >
             ←
           </button>
           
-          <div className="flex items-center gap-2 font-semibold text-lg text-gray-700">
+          <div className={`flex items-center gap-2 font-semibold text-lg ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>
             <Calendar size={18} className="text-rose-400" />
             {selectedDate}
             {isToday && <span className="text-xs bg-rose-100 text-rose-600 px-2 py-0.5 rounded-full">今天</span>}
@@ -598,29 +717,29 @@ export default function BabyMilkTracker() {
           <button 
             onClick={() => changeDate(1)}
             disabled={isToday}
-            className={`p-2 rounded-full transition ${isToday ? 'text-gray-200 cursor-not-allowed' : 'text-gray-500 hover:bg-gray-100 active:scale-95'}`}
+            className={`p-2 rounded-full transition ${isToday ? 'text-gray-600 opacity-30 cursor-not-allowed' : darkMode ? 'text-gray-400 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100 active:scale-95'}`}
           >
             →
           </button>
         </div>
 
         {/* Daily Summary Card */}
-        <div className="bg-gradient-to-br from-rose-400 to-rose-500 rounded-3xl p-6 text-white shadow-lg shadow-rose-200">
+        <div className={`rounded-3xl p-6 text-white shadow-lg transition-colors duration-300 ${darkMode ? 'bg-gray-800 shadow-none border border-gray-700' : 'bg-gradient-to-br from-rose-400 to-rose-500 shadow-rose-200'}`}>
           <div className="flex flex-col gap-4">
-            {/* 距离上次喂奶时间 - 放在最显眼的位置 */}
-            <div className="bg-white/20 backdrop-blur-sm rounded-xl p-3 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-rose-50 font-medium text-sm">
+            {/* 距离上次喂奶时间 */}
+            <div className={`rounded-xl p-3 flex items-center justify-between ${darkMode ? 'bg-gray-700/50' : 'bg-white/20 backdrop-blur-sm'}`}>
+              <div className={`flex items-center gap-2 font-medium text-sm ${darkMode ? 'text-gray-300' : 'text-rose-50'}`}>
                 <Timer size={16} />
                 <span>距离上次喂奶</span>
               </div>
-              <div className="font-bold text-lg">
+              <div className={`font-bold text-lg ${darkMode ? 'text-white' : 'text-white'}`}>
                 {timeSinceLastFeed || '暂无数据'}
               </div>
             </div>
 
             <div>
               <div className="flex items-center justify-between mb-2">
-                <h2 className="text-rose-100 font-medium text-sm flex items-center gap-2">
+                <h2 className={`font-medium text-sm flex items-center gap-2 ${darkMode ? 'text-gray-400' : 'text-rose-100'}`}>
                   <Droplets size={16} />
                   {isToday ? '今日总量' : '当日总量'}
                 </h2>
@@ -628,17 +747,42 @@ export default function BabyMilkTracker() {
               <div className="text-5xl font-bold tracking-tight mb-1">
                 {totalAmount}<span className="text-2xl font-normal opacity-80 ml-1">ml</span>
               </div>
-              <div className="text-rose-100 text-sm">
+              <div className={`${darkMode ? 'text-gray-400' : 'text-rose-100'} text-sm`}>
                 共喂奶 {filteredRecords.length} 次
               </div>
             </div>
           </div>
         </div>
 
+        {/* Vitamin D3 Tracker */}
+        <div className={`rounded-2xl p-4 shadow-sm border transition-colors duration-300 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-blue-50'}`}>
+          <div className="flex items-center justify-between">
+            <h3 className={`font-semibold ml-1 flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              <Pill size={18} className="text-blue-400" />
+              今日维生素 D3
+            </h3>
+            <div className="flex gap-4">
+              {[0, 1].map((index) => (
+                <button
+                  key={index}
+                  onClick={() => toggleD3(index)}
+                  className={`w-12 h-8 rounded-full flex items-center justify-center transition-all duration-300 border-2 ${
+                    d3Status[index] 
+                      ? 'bg-blue-400 border-blue-400 shadow-md scale-105' 
+                      : darkMode ? 'bg-gray-700 border-gray-600' : 'bg-gray-100 border-gray-200'
+                  }`}
+                >
+                  {d3Status[index] && <Check size={16} className="text-white" />}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {/* Add Record Form */}
         {isToday ? (
-          <div className="bg-white rounded-2xl p-4 shadow-sm border border-rose-100">
-            <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">
+          <div className={`rounded-2xl p-4 shadow-sm border transition-colors duration-300 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-rose-100'}`}>
+            <label className={`block text-sm font-medium mb-2 ml-1 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
               新增记录
             </label>
             <div className="flex gap-3">
@@ -654,15 +798,23 @@ export default function BabyMilkTracker() {
                       handleAddRecord(e);
                     }
                   }}
-                  className="w-full bg-gray-50 border-0 rounded-xl px-4 py-3 text-lg font-medium focus:ring-2 focus:ring-rose-400 outline-none transition appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  className={`w-full border-0 rounded-xl px-4 py-3 text-lg font-medium outline-none transition appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none ${
+                    darkMode 
+                      ? 'bg-gray-700 text-white focus:ring-2 focus:ring-rose-500 placeholder-gray-500' 
+                      : 'bg-gray-50 text-gray-800 focus:ring-2 focus:ring-rose-400'
+                  }`}
                   autoFocus
                 />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-medium">ml</span>
+                <span className={`absolute right-4 top-1/2 -translate-y-1/2 font-medium ${darkMode ? 'text-gray-400' : 'text-gray-400'}`}>ml</span>
               </div>
               <button 
                 onClick={handleAddRecord}
                 disabled={!amount || isSubmitting}
-                className="bg-gray-900 text-white rounded-xl px-6 py-3 font-semibold hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition flex items-center gap-2"
+                className={`rounded-xl px-6 py-3 font-semibold disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition flex items-center gap-2 ${
+                  darkMode 
+                    ? 'bg-rose-600 text-white hover:bg-rose-700' 
+                    : 'bg-gray-900 text-white hover:bg-gray-800'
+                }`}
               >
                 <Plus size={20} />
                 记录
@@ -675,7 +827,11 @@ export default function BabyMilkTracker() {
                 <button
                   key={val}
                   onClick={() => setAmount(val.toString())}
-                  className="px-3 py-1.5 bg-rose-50 text-rose-600 text-sm font-medium rounded-lg hover:bg-rose-100 transition whitespace-nowrap"
+                  className={`px-3 py-1.5 text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                    darkMode 
+                      ? 'bg-gray-700 text-rose-300 hover:bg-gray-600' 
+                      : 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                  }`}
                 >
                   {val}
                 </button>
@@ -683,27 +839,29 @@ export default function BabyMilkTracker() {
             </div>
           </div>
         ) : (
-          <div className="text-center py-4 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400 text-sm">
+          <div className={`text-center py-4 rounded-xl border border-dashed text-sm ${darkMode ? 'bg-gray-800 border-gray-700 text-gray-500' : 'bg-gray-50 border-gray-200 text-gray-400'}`}>
             只能记录当天的喂奶数据哦
           </div>
         )}
 
         {/* Records List */}
         <div className="space-y-4">
-          <h3 className="font-semibold text-gray-700 ml-1 flex items-center gap-2">
+          <h3 className={`font-semibold ml-1 flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
             <History size={18} className="text-gray-400" />
             当日记录
           </h3>
           
           {filteredRecords.length === 0 ? (
             <div className="text-center py-10 opacity-40">
-              <Baby size={48} className="mx-auto mb-2 text-gray-400" />
-              <p>还没有记录哦</p>
+              <Baby size={48} className={`mx-auto mb-2 ${darkMode ? 'text-gray-600' : 'text-gray-400'}`} />
+              <p className={darkMode ? 'text-gray-500' : ''}>还没有记录哦</p>
             </div>
           ) : (
             <div className="space-y-3">
               {filteredRecords.map((record) => (
-                <div key={record.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between group transition-all duration-200">
+                <div key={record.id} className={`p-4 rounded-2xl shadow-sm border flex items-center justify-between group transition-all duration-200 ${
+                  darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-100'
+                }`}>
                   {editingRecord === record.id ? (
                     // 编辑模式
                     <div className="flex-1 flex items-center gap-3 flex-wrap">
@@ -711,14 +869,18 @@ export default function BabyMilkTracker() {
                         type="number"
                         value={editAmount}
                         onChange={(e) => setEditAmount(e.target.value)}
-                        className="w-24 bg-gray-50 border-0 rounded-lg px-3 py-2 text-lg font-bold focus:ring-2 focus:ring-rose-400 outline-none"
+                        className={`w-24 border-0 rounded-lg px-3 py-2 text-lg font-bold outline-none ${
+                          darkMode ? 'bg-gray-700 text-white focus:ring-2 focus:ring-rose-500' : 'bg-gray-50 focus:ring-2 focus:ring-rose-400'
+                        }`}
                       />
                       <span className="text-sm text-gray-500">ml</span>
                       <input
                         type="time"
                         value={editTime}
                         onChange={(e) => setEditTime(e.target.value)}
-                        className="bg-gray-50 border-0 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-rose-400 outline-none"
+                        className={`border-0 rounded-lg px-3 py-2 text-sm outline-none ${
+                          darkMode ? 'bg-gray-700 text-white focus:ring-2 focus:ring-rose-500' : 'bg-gray-50 focus:ring-2 focus:ring-rose-400'
+                        }`}
                       />
                       <button
                         onClick={() => saveEdit(record)}
@@ -728,7 +890,9 @@ export default function BabyMilkTracker() {
                       </button>
                       <button
                         onClick={cancelEdit}
-                        className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-300 transition"
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                          darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                        }`}
                       >
                         取消
                       </button>
@@ -749,7 +913,9 @@ export default function BabyMilkTracker() {
                         </button>
                         <button
                           onClick={cancelDelete}
-                          className="px-4 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-200 transition active:scale-95"
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition active:scale-95 ${
+                            darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
                         >
                           取消
                         </button>
@@ -759,11 +925,11 @@ export default function BabyMilkTracker() {
                     // 正常显示模式
                     <>
                       <div className="flex items-center gap-4">
-                        <div className="bg-blue-50 text-blue-500 p-2.5 rounded-xl">
+                        <div className={`p-2.5 rounded-xl ${darkMode ? 'bg-gray-700 text-blue-400' : 'bg-blue-50 text-blue-500'}`}>
                           <Clock size={20} />
                         </div>
                         <div>
-                          <div className="font-bold text-gray-800 text-lg">
+                          <div className={`font-bold text-lg ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>
                             {record.amount} <span className="text-sm font-normal text-gray-500">ml</span>
                           </div>
                           <div className="text-xs text-gray-400 font-medium">
@@ -775,14 +941,18 @@ export default function BabyMilkTracker() {
                       <div className="flex items-center gap-2">
                         <button 
                           onClick={() => startEdit(record)}
-                          className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition active:scale-95"
+                          className={`p-2 rounded-lg transition active:scale-95 ${
+                            darkMode ? 'text-gray-500 hover:text-blue-400 hover:bg-gray-700' : 'text-gray-300 hover:text-blue-500 hover:bg-blue-50'
+                          }`}
                           aria-label="Edit"
                         >
                           <Edit2 size={18} />
                         </button>
                         <button 
                           onClick={() => requestDelete(record.id)}
-                          className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition active:scale-95"
+                          className={`p-2 rounded-lg transition active:scale-95 ${
+                            darkMode ? 'text-gray-500 hover:text-red-400 hover:bg-gray-700' : 'text-gray-300 hover:text-red-500 hover:bg-red-50'
+                          }`}
                           aria-label="Delete"
                         >
                           <Trash2 size={18} />
@@ -800,15 +970,15 @@ export default function BabyMilkTracker() {
       {/* Trend Chart Modal */}
       {showTrendChart && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-white w-full max-w-2xl rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="p-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+          <div className={`w-full max-w-2xl rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+            <div className={`p-4 border-b flex items-center justify-between shrink-0 ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
+              <h2 className={`text-lg font-bold flex items-center gap-2 ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>
                 <TrendingUp className="text-purple-500" size={20} />
                 15天趋势图
               </h2>
               <button 
                 onClick={() => setShowTrendChart(false)}
-                className="p-2 hover:bg-gray-100 rounded-full text-gray-500 transition"
+                className={`p-2 rounded-full transition ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
               >
                 <X size={20} />
               </button>
@@ -816,21 +986,21 @@ export default function BabyMilkTracker() {
 
             <div className="flex-1 overflow-y-auto p-6">
               <div className="grid grid-cols-3 gap-3 mb-6">
-                <div className="bg-blue-50 rounded-xl p-4">
-                  <div className="text-xs text-blue-600 font-medium mb-1">平均每日</div>
-                  <div className="text-2xl font-bold text-blue-700">{trendStats.avg}<span className="text-sm ml-1">ml</span></div>
+                <div className={`rounded-xl p-4 ${darkMode ? 'bg-blue-900/30' : 'bg-blue-50'}`}>
+                  <div className={`text-xs font-medium mb-1 ${darkMode ? 'text-blue-300' : 'text-blue-600'}`}>平均每日</div>
+                  <div className={`text-2xl font-bold ${darkMode ? 'text-blue-200' : 'text-blue-700'}`}>{trendStats.avg}<span className="text-sm ml-1">ml</span></div>
                 </div>
-                <div className="bg-green-50 rounded-xl p-4">
-                  <div className="text-xs text-green-600 font-medium mb-1">最高</div>
-                  <div className="text-2xl font-bold text-green-700">{trendStats.max}<span className="text-sm ml-1">ml</span></div>
+                <div className={`rounded-xl p-4 ${darkMode ? 'bg-green-900/30' : 'bg-green-50'}`}>
+                  <div className={`text-xs font-medium mb-1 ${darkMode ? 'text-green-300' : 'text-green-600'}`}>最高</div>
+                  <div className={`text-2xl font-bold ${darkMode ? 'text-green-200' : 'text-green-700'}`}>{trendStats.max}<span className="text-sm ml-1">ml</span></div>
                 </div>
-                <div className="bg-orange-50 rounded-xl p-4">
-                  <div className="text-xs text-orange-600 font-medium mb-1">最低</div>
-                  <div className="text-2xl font-bold text-orange-700">{trendStats.min}<span className="text-sm ml-1">ml</span></div>
+                <div className={`rounded-xl p-4 ${darkMode ? 'bg-orange-900/30' : 'bg-orange-50'}`}>
+                  <div className={`text-xs font-medium mb-1 ${darkMode ? 'text-orange-300' : 'text-orange-600'}`}>最低</div>
+                  <div className={`text-2xl font-bold ${darkMode ? 'text-orange-200' : 'text-orange-700'}`}>{trendStats.min}<span className="text-sm ml-1">ml</span></div>
                 </div>
               </div>
 
-              <div className="bg-gray-50 rounded-2xl p-4">
+              <div className={`rounded-2xl p-4 ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
                 <div className="relative h-72">
                   <div className="absolute left-0 top-0 bottom-8 w-10 flex flex-col justify-between text-xs text-gray-500 text-right pr-1">
                     <span>1500</span>
@@ -844,7 +1014,7 @@ export default function BabyMilkTracker() {
                   <div className="ml-11 h-full relative pb-8">
                     <div className="absolute inset-0 bottom-8 flex flex-col justify-between">
                       {[0, 1, 2, 3, 4, 5].map(i => (
-                        <div key={i} className="border-t border-gray-200"></div>
+                        <div key={i} className={`border-t ${darkMode ? 'border-gray-600' : 'border-gray-200'}`}></div>
                       ))}
                     </div>
                     
@@ -856,8 +1026,8 @@ export default function BabyMilkTracker() {
                           return i === 0 ? `M ${x} ${y}` : `L ${x} ${y}`;
                         }).join(' ')}
                         fill="none"
-                        stroke="rgb(244, 114, 182)"
-                        strokeWidth="0.8"
+                        stroke={darkMode ? "#fb7185" : "rgb(244, 114, 182)"}
+                        strokeWidth="1.5"
                         vectorEffect="non-scaling-stroke"
                       />
                     </svg>
@@ -881,7 +1051,7 @@ export default function BabyMilkTracker() {
                             {isTodayDate && (
                               <div className="absolute inset-0 w-5 h-5 rounded-full border-2 border-rose-400 -translate-x-1/2 -translate-y-1/2" style={{ left: '50%', top: '50%' }}></div>
                             )}
-                            <div className="w-3 h-3 rounded-full bg-white border-2 border-rose-400"></div>
+                            <div className={`w-3 h-3 rounded-full border-2 ${darkMode ? 'bg-gray-800 border-rose-400' : 'bg-white border-rose-400'}`}></div>
                           </div>
                         );
                       })}
@@ -895,10 +1065,6 @@ export default function BabyMilkTracker() {
                   </div>
                 </div>
               </div>
-              
-              <div className="mt-4 text-sm text-gray-500 text-center">
-                显示最近15天的每日总摄入量趋势
-              </div>
             </div>
           </div>
         </div>
@@ -907,15 +1073,15 @@ export default function BabyMilkTracker() {
       {/* Stats Overlay Modal */}
       {showStats && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-white w-full max-w-md rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="p-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+          <div className={`w-full max-w-md rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+            <div className={`p-4 border-b flex items-center justify-between shrink-0 ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
+              <h2 className={`text-lg font-bold flex items-center gap-2 ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>
                 <BarChart3 className="text-rose-500" size={20} />
                 历史统计
               </h2>
               <button 
                 onClick={() => setShowStats(false)}
-                className="p-2 hover:bg-gray-100 rounded-full text-gray-500 transition"
+                className={`p-2 rounded-full transition ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
               >
                 <X size={20} />
               </button>
@@ -930,12 +1096,20 @@ export default function BabyMilkTracker() {
                 dailyStats.map((stat, index) => (
                   <div 
                     key={stat.date} 
-                    className={`flex items-center justify-between p-4 rounded-xl border ${index === 0 ? 'bg-rose-50 border-rose-100' : 'bg-white border-gray-100'}`}
+                    className={`flex items-center justify-between p-4 rounded-xl border ${
+                      index === 0 
+                        ? (darkMode ? 'bg-gray-700/50 border-rose-900' : 'bg-rose-50 border-rose-100')
+                        : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-100')
+                    }`}
                   >
                     <div className="flex items-center gap-3">
                       <div className={`w-2 h-10 rounded-full ${index === 0 ? 'bg-rose-400' : 'bg-gray-200'}`}></div>
                       <div>
-                        <div className={`font-semibold ${index === 0 ? 'text-gray-900' : 'text-gray-600'}`}>
+                        <div className={`font-semibold ${
+                          index === 0 
+                            ? (darkMode ? 'text-white' : 'text-gray-900') 
+                            : (darkMode ? 'text-gray-400' : 'text-gray-600')
+                        }`}>
                           {stat.date}
                         </div>
                         <div className="text-xs text-gray-400">
@@ -944,7 +1118,7 @@ export default function BabyMilkTracker() {
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="font-bold text-xl text-gray-800">
+                      <div className={`font-bold text-xl ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
                         {stat.total} <span className="text-sm font-normal text-gray-400">ml</span>
                       </div>
                     </div>
@@ -953,7 +1127,7 @@ export default function BabyMilkTracker() {
               )}
             </div>
             
-            <div className="p-4 border-t border-gray-100 shrink-0 text-center text-xs text-gray-400">
+            <div className={`p-4 border-t shrink-0 text-center text-xs text-gray-400 ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
               仅统计有记录的日期
             </div>
           </div>

@@ -2,14 +2,34 @@
 // 路径: functions/api/records.js
 
 export async function onRequestGet(context) {
-  const { env } = context;
+  const { env, request } = context;
+  const url = new URL(request.url);
+  const type = url.searchParams.get('type');
   
   try {
-    // 获取所有记录
+    // === 场景 1: 获取维生素 D3 状态 ===
+    if (type === 'd3') {
+      const date = url.searchParams.get('date');
+      if (!date) return new Response(JSON.stringify({ error: 'Missing date' }), { status: 400 });
+      
+      const value = await env.MILK_RECORDS.get(`d3_${date}`);
+      // 如果没记录，默认返回 [false, false]
+      return new Response(JSON.stringify({ status: value ? JSON.parse(value) : [false, false] }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    // === 场景 2: 获取喝奶记录 (默认) ===
     const list = await env.MILK_RECORDS.list();
     const records = [];
     
     for (const key of list.keys) {
+      // 关键：过滤掉 D3 的记录，防止混入喝奶列表
+      if (key.name.startsWith('d3_')) continue;
+
       const value = await env.MILK_RECORDS.get(key.name);
       if (value) {
         records.push({
@@ -19,16 +39,14 @@ export async function onRequestGet(context) {
       }
     }
     
-    // 按日期和时间排序（降序）
-    // 逻辑必须与前端保持完全一致：日期 -> 显示时间(HH:mm) -> 时间戳
+    // 排序逻辑 (保持之前的日期+时间双重排序)
     records.sort((a, b) => {
       // 1. 先按日期排序
       if (a.dateString !== b.dateString) {
         return b.dateString.localeCompare(a.dateString);
       }
       
-      // 2. 按显示时间排序(降序) - 几点喝的
-      // 解析 "20:30" 这种格式
+      // 2. 按显示时间排序(降序)
       const timeA = a.displayTime.split(':').map(Number);
       const timeB = b.displayTime.split(':').map(Number);
       const minutesA = timeA[0] * 60 + timeA[1];
@@ -38,8 +56,7 @@ export async function onRequestGet(context) {
         return minutesB - minutesA;
       }
 
-      // 3. 最后按创建时间戳兜底(降序)
-      // 如果同一分钟有两条，后记的排前面
+      // 3. 时间戳兜底
       if (a.timestamp && b.timestamp) {
         return b.timestamp - a.timestamp;
       }
@@ -70,11 +87,23 @@ export async function onRequestPost(context) {
   try {
     const data = await request.json();
     
-    // 如果前端传了 ID（用于保持乐观UI的一致性），就用前端的
-    // 如果没传，则生成一个新的
+    // === 场景 1: 保存 D3 状态 ===
+    if (data.type === 'd3') {
+      const key = `d3_${data.dateString}`;
+      // 直接存 boolean 数组，比如 [true, false]
+      await env.MILK_RECORDS.put(key, JSON.stringify(data.status));
+      
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    // === 场景 2: 保存喝奶记录 (默认) ===
     const id = data.id || `record_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // 存储到 KV
     await env.MILK_RECORDS.put(id, JSON.stringify(data));
     
     return new Response(JSON.stringify({ success: true, id }), {
@@ -92,6 +121,7 @@ export async function onRequestPost(context) {
 }
 
 export async function onRequestDelete(context) {
+  // 删除逻辑不变，只处理 ID 删除
   const { request, env } = context;
   
   try {
@@ -121,7 +151,6 @@ export async function onRequestDelete(context) {
   }
 }
 
-// 处理 OPTIONS 请求 (CORS 预检)
 export async function onRequestOptions() {
   return new Response(null, {
     headers: {
