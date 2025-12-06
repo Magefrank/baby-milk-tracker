@@ -10,27 +10,23 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// 优化的排序函数：增加了"防崩溃"保护
+// 优化的排序函数
 const sortRecordsByTime = (records) => {
   if (!Array.isArray(records)) return [];
   
   return [...records].sort((a, b) => {
-    // 保护：如果有坏数据（缺字段），扔到最后
     if (!a || !b) return 0;
     if (!a.dateString && !b.dateString) return 0;
     if (!a.dateString) return 1;
     if (!b.dateString) return -1;
 
-    // 1. 先按日期排序(降序)
     if (a.dateString !== b.dateString) {
       return b.dateString.localeCompare(a.dateString);
     }
     
-    // 保护：确保 displayTime 存在
     const timeStrA = a.displayTime || "00:00";
     const timeStrB = b.displayTime || "00:00";
 
-    // 2. 再按显示时间排序(降序)
     try {
       const timeA = timeStrA.split(':').map(Number);
       const timeB = timeStrB.split(':').map(Number);
@@ -41,11 +37,9 @@ const sortRecordsByTime = (records) => {
         return minutesB - minutesA;
       }
     } catch (e) {
-      console.warn('时间解析出错', e);
       return 0;
     }
 
-    // 3. 最后按创建时间戳兜底
     const tsA = a.timestamp || 0;
     const tsB = b.timestamp || 0;
     return tsB - tsA;
@@ -77,27 +71,18 @@ export default function BabyMilkTracker() {
   const [showStats, setShowStats] = useState(false);
   const [showTrendChart, setShowTrendChart] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
-  
-  // 深色模式
   const [darkMode, setDarkMode] = useState(false);
-  
-  // D3 状态 (现在会从后端同步)
   const [d3Status, setD3Status] = useState([false, false]);
-  
   const [now, setNow] = useState(new Date());
-  
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const CORRECT_PASSWORD = 'mumu';
-  
   const [editingRecord, setEditingRecord] = useState(null);
   const [editAmount, setEditAmount] = useState('');
   const [editTime, setEditTime] = useState('');
-
   const [deletingId, setDeletingId] = useState(null);
   
-  // 初始化深色模式
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'dark') {
@@ -121,9 +106,6 @@ export default function BabyMilkTracker() {
     }
   };
 
-  // --- D3 相关逻辑 ---
-
-  // 1. 从后端获取 D3 状态
   const fetchD3Status = async (date) => {
     try {
       const response = await safeFetch(`/api/records?type=d3&date=${date}`);
@@ -131,11 +113,9 @@ export default function BabyMilkTracker() {
         const data = await response.json();
         if (data && Array.isArray(data.status)) {
           setD3Status(data.status);
-          // 顺便更新本地缓存做备份
           localStorage.setItem(`${D3_STORAGE_KEY_PREFIX}${date}`, JSON.stringify(data.status));
         }
       } else {
-        // 如果后端失败（比如断网），降级读取本地缓存
         const saved = localStorage.getItem(`${D3_STORAGE_KEY_PREFIX}${date}`);
         if (saved) setD3Status(JSON.parse(saved));
         else setD3Status([false, false]);
@@ -145,29 +125,40 @@ export default function BabyMilkTracker() {
     }
   };
 
-  // 2. 监听日期变化，加载对应日期的 D3
+  // 关键修复：监听日期变化
   useEffect(() => {
+    // 1. 立即重置 UI（防止显示上一天的数据）
+    // 优先尝试读取这一天的本地缓存，让体验更丝滑
+    const key = `${D3_STORAGE_KEY_PREFIX}${selectedDate}`;
+    const saved = localStorage.getItem(key);
+    
+    if (saved) {
+      try {
+        setD3Status(JSON.parse(saved));
+      } catch (e) {
+        setD3Status([false, false]);
+      }
+    } else {
+      // 如果没有缓存，立即置空，不要保留上一天的勾选状态
+      setD3Status([false, false]);
+    }
+
+    // 2. 然后再去后台拉取最新数据（确保多端同步）
     fetchD3Status(selectedDate);
   }, [selectedDate]);
 
-  // 3. 切换状态并保存到后端
   const toggleD3 = async (index) => {
     const newStatus = [...d3Status];
     newStatus[index] = !newStatus[index];
-    
-    // 立即更新 UI (Optimistic Update)
     setD3Status(newStatus);
-    
-    // 更新本地缓存
     localStorage.setItem(`${D3_STORAGE_KEY_PREFIX}${selectedDate}`, JSON.stringify(newStatus));
     
-    // 发送到后端
     try {
       await safeFetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: 'd3', // 告诉后端这是 D3 数据
+          type: 'd3',
           dateString: selectedDate,
           status: newStatus
         })
@@ -177,22 +168,18 @@ export default function BabyMilkTracker() {
     }
   };
 
-  // 导出 CSV
   const handleExport = () => {
     if (records.length === 0) {
       alert('暂无数据可导出');
       return;
     }
-
     const headers = ['日期,时间,奶量(ml),时间戳'];
     const rows = records.map(r => 
       `${r.dateString},${r.displayTime},${r.amount},${new Date(r.timestamp).toLocaleString()}`
     );
-
     const csvContent = "\uFEFF" + [headers, ...rows].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    
     const link = document.createElement('a');
     link.href = url;
     link.download = `沐沐喝奶记录_${new Date().toISOString().split('T')[0]}.csv`;
@@ -217,7 +204,6 @@ export default function BabyMilkTracker() {
     return () => clearInterval(timer);
   }, []);
 
-  // 从本地缓存加载喝奶记录
   useEffect(() => {
     try {
       const cached = localStorage.getItem(STORAGE_KEY);
@@ -249,15 +235,12 @@ export default function BabyMilkTracker() {
   
   const smartMergeRecords = useCallback((serverList, localList) => {
     if (!Array.isArray(serverList)) return localList;
-    
     const serverMap = new Map(serverList.map(r => [r.id, r]));
     const nowTs = Date.now();
     const RECENT_THRESHOLD = 5 * 60 * 1000; 
-
     localList.forEach(local => {
       if (local.updatedAt && (nowTs - local.updatedAt < RECENT_THRESHOLD)) {
         const serverRecord = serverMap.get(local.id);
-        
         if (!serverRecord) {
           serverMap.set(local.id, local);
         } else {
@@ -268,7 +251,6 @@ export default function BabyMilkTracker() {
         }
       }
     });
-
     return Array.from(serverMap.values());
   }, []);
 
@@ -282,7 +264,6 @@ export default function BabyMilkTracker() {
           'Pragma': 'no-cache'
         }
       });
-      
       if (response && response.ok) {
         const serverData = await response.json();
         setRecords(prevLocalRecords => {
@@ -317,31 +298,20 @@ export default function BabyMilkTracker() {
     return filteredRecords.reduce((sum, record) => sum + Number(record.amount || 0), 0);
   }, [filteredRecords]);
 
-  // 计算距离上次喂奶 (增强防御版)
   const timeSinceLastFeed = useMemo(() => {
     if (!records || records.length === 0) return null;
-    
     const lastRecord = records[0];
     if (!lastRecord || !lastRecord.dateString || !lastRecord.displayTime) return '数据不全';
-    
     try {
       const [year, month, day] = lastRecord.dateString.split('-').map(Number);
       const [hour, minute] = lastRecord.displayTime.split(':').map(Number);
-      
-      // 使用更稳健的日期构造方式
       const recordDate = new Date(year, month - 1, day, hour, minute);
-      
-      // 检查日期是否有效
       if (isNaN(recordDate.getTime())) return '时间无效';
-      
       const diffInMinutes = Math.floor((now - recordDate) / (1000 * 60));
-      
       if (diffInMinutes < 0) return '时间设定在未来'; 
       if (diffInMinutes < 1) return '刚刚';
-      
       const hours = Math.floor(diffInMinutes / 60);
       const minutes = diffInMinutes % 60;
-      
       if (hours === 0) return `${minutes}分钟前`;
       if (hours > 24) {
           const days = Math.floor(hours / 24);
@@ -349,7 +319,6 @@ export default function BabyMilkTracker() {
       }
       return `${hours}小时 ${minutes}分钟前`;
     } catch (e) {
-      console.error('计算时间差出错', e);
       return '计算出错';
     }
   }, [records, now]);
@@ -361,7 +330,6 @@ export default function BabyMilkTracker() {
       const date = record.dateString;
       stats[date] = (stats[date] || 0) + Number(record.amount || 0);
     });
-    
     return Object.entries(stats)
       .map(([date, total]) => ({ date, total }))
       .sort((a, b) => b.date.localeCompare(a.date));
@@ -370,36 +338,28 @@ export default function BabyMilkTracker() {
   const trendData = useMemo(() => {
     const last15Days = [];
     const today = new Date();
-    
     for (let i = 14; i >= 0; i--) {
-      // Safari 兼容的日期操作
       const date = new Date(today);
       date.setDate(date.getDate() - i);
-      
-      // 手动构建 YYYY-MM-DD，避免时区问题
       const y = date.getFullYear();
       const m = String(date.getMonth() + 1).padStart(2, '0');
       const d = String(date.getDate()).padStart(2, '0');
       const dateString = `${y}-${m}-${d}`;
-      
       const dayTotal = records
         .filter(r => r && r.dateString === dateString)
         .reduce((sum, r) => sum + Number(r.amount || 0), 0);
-      
       last15Days.push({
         date: dateString,
         shortDate: `${Number(m)}/${Number(d)}`,
         total: dayTotal
       });
     }
-    
     return last15Days;
   }, [records]);
 
   const trendStats = useMemo(() => {
     const totals = trendData.map(d => d.total).filter(t => t > 0);
     if (totals.length === 0) return { avg: 0, max: 0, min: 0 };
-    
     return {
       avg: Math.round(totals.reduce((a, b) => a + b, 0) / totals.length),
       max: Math.max(...totals),
@@ -417,17 +377,13 @@ export default function BabyMilkTracker() {
   const handleAddRecord = async (e) => {
     e.preventDefault();
     if (!amount) return;
-    
     setIsSubmitting(true);
     const nowTime = new Date();
-    // 构造本地日期字符串
     const y = nowTime.getFullYear();
     const m = String(nowTime.getMonth() + 1).padStart(2, '0');
     const d = String(nowTime.getDate()).padStart(2, '0');
     const todayString = `${y}-${m}-${d}`;
-
     const timestamp = Date.now();
-    
     const newRecord = {
       id: `temp_${timestamp}_${Math.random().toString(36).substr(2, 9)}`,
       amount: Number(amount),
@@ -436,7 +392,6 @@ export default function BabyMilkTracker() {
       dateString: todayString,
       displayTime: nowTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     };
-    
     try {
       setRecords(prevRecords => {
         const newRecords = sortRecordsByTime([...prevRecords, newRecord]);
@@ -445,19 +400,16 @@ export default function BabyMilkTracker() {
         } catch(e){}
         return newRecords;
       });
-      
       setAmount('');
       if (selectedDate !== todayString) {
         setSelectedDate(todayString);
       }
       showSuccess();
-      
       const response = await safeFetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newRecord)
       });
-      
       if (response && response.ok) {
         setTimeout(() => fetchRecords(), 5000);
       }
@@ -483,16 +435,13 @@ export default function BabyMilkTracker() {
 
   const saveEdit = async (record) => {
     if (!editAmount || !editTime) return;
-    
     const timestamp = Date.now();
-    
     const updatedRecord = {
       ...record,
       amount: Number(editAmount),
       displayTime: editTime,
       updatedAt: timestamp
     };
-    
     setRecords(prev => {
       const updated = prev.map(r => r.id === record.id ? updatedRecord : r);
       const sorted = sortRecordsByTime(updated);
@@ -501,21 +450,17 @@ export default function BabyMilkTracker() {
       } catch(e){}
       return sorted;
     });
-    
     cancelEdit();
     showSuccess();
-    
     try {
       const deleteResponse = await safeFetch(`/api/records?id=${record.id}`, { 
         method: 'DELETE' 
       });
-      
       const createResponse = await safeFetch('/api/records', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedRecord)
       });
-      
       if (createResponse && createResponse.ok) {
         setTimeout(() => fetchRecords(), 5000);
       }
@@ -536,7 +481,6 @@ export default function BabyMilkTracker() {
 
   const confirmDelete = async (id) => {
     setDeletingId(null);
-    
     setRecords(prev => {
       const updated = prev.filter(r => r.id !== id);
       try {
@@ -544,12 +488,10 @@ export default function BabyMilkTracker() {
       } catch(e){}
       return updated;
     });
-    
     try {
       const response = await safeFetch(`/api/records?id=${id}`, {
         method: 'DELETE'
       });
-      
       if (response && response.ok) {
         setTimeout(() => fetchRecords(), 5000);
       }
@@ -559,23 +501,14 @@ export default function BabyMilkTracker() {
     }
   };
 
-  // 修复 Safari 日期切换问题：手动计算日期
   const changeDate = (offset) => {
     try {
-      // 解析当前选中日期的年、月、日
       const [currYear, currMonth, currDay] = selectedDate.split('-').map(Number);
-      
-      // 创建本地日期对象（注意月份要减1）
       const date = new Date(currYear, currMonth - 1, currDay);
-      
-      // 增加/减少天数
       date.setDate(date.getDate() + offset);
-      
-      // 格式化回 YYYY-MM-DD
       const y = date.getFullYear();
       const m = String(date.getMonth() + 1).padStart(2, '0');
       const d = String(date.getDate()).padStart(2, '0');
-      
       setSelectedDate(`${y}-${m}-${d}`);
     } catch(e) {
       console.error('切换日期出错', e);
@@ -595,7 +528,6 @@ export default function BabyMilkTracker() {
             <h1 className="text-2xl font-bold text-gray-800">沐沐喝奶记</h1>
             <p className="text-gray-500 mt-2">请输入密码访问</p>
           </div>
-          
           <div className="space-y-4">
             <div>
               <input
@@ -615,7 +547,6 @@ export default function BabyMilkTracker() {
                 <p className="text-red-500 text-sm mt-2">{passwordError}</p>
               )}
             </div>
-            
             <button
               onClick={handlePasswordSubmit}
               disabled={!password}
@@ -629,7 +560,6 @@ export default function BabyMilkTracker() {
     );
   }
 
-  // 加载状态只有在没有记录时才显示
   if (loading && records.length === 0) {
     return (
       <div className="min-h-screen bg-rose-50 dark:bg-gray-900 flex items-center justify-center">
@@ -643,7 +573,6 @@ export default function BabyMilkTracker() {
 
   return (
     <div className={`min-h-screen font-sans pb-20 relative transition-colors duration-300 ${darkMode ? 'bg-gray-900 text-gray-100' : 'bg-rose-50 text-gray-800'}`}>
-      {/* Success Toast */}
       {showSuccessToast && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-5 duration-300">
           <div className="bg-green-500 text-white px-6 py-3 rounded-full shadow-lg flex items-center gap-2">
@@ -655,7 +584,6 @@ export default function BabyMilkTracker() {
         </div>
       )}
 
-      {/* Header */}
       <header className={`${darkMode ? 'bg-gray-800 shadow-gray-900' : 'bg-white shadow-sm'} sticky top-0 z-10 transition-colors duration-300`}>
         <div className="max-w-md mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -665,14 +593,12 @@ export default function BabyMilkTracker() {
             <h1 className={`text-xl font-bold ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>沐沐喝奶记</h1>
           </div>
           <div className="flex items-center gap-2">
-            {/* 深色模式开关 */}
             <button 
               onClick={toggleTheme}
               className={`p-2 rounded-xl transition ${darkMode ? 'bg-gray-700 text-yellow-400' : 'bg-gray-50 text-gray-500'}`}
             >
               {darkMode ? <Sun size={20} /> : <Moon size={20} />}
             </button>
-            {/* 导出按钮 */}
             <button 
               onClick={handleExport}
               className={`p-2 rounded-xl transition ${darkMode ? 'bg-gray-700 text-blue-400' : 'bg-gray-50 text-blue-500'}`}
@@ -696,10 +622,7 @@ export default function BabyMilkTracker() {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-md mx-auto px-4 py-6 space-y-6">
-        
-        {/* Date Navigator */}
         <div className={`flex items-center justify-between p-3 rounded-2xl shadow-sm transition-colors duration-300 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
           <button 
             onClick={() => changeDate(-1)}
@@ -707,13 +630,11 @@ export default function BabyMilkTracker() {
           >
             ←
           </button>
-          
           <div className={`flex items-center gap-2 font-semibold text-lg ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>
             <Calendar size={18} className="text-rose-400" />
             {selectedDate}
             {isToday && <span className="text-xs bg-rose-100 text-rose-600 px-2 py-0.5 rounded-full">今天</span>}
           </div>
-
           <button 
             onClick={() => changeDate(1)}
             disabled={isToday}
@@ -723,10 +644,8 @@ export default function BabyMilkTracker() {
           </button>
         </div>
 
-        {/* Daily Summary Card */}
         <div className={`rounded-3xl p-6 text-white shadow-lg transition-colors duration-300 ${darkMode ? 'bg-gray-800 shadow-none border border-gray-700' : 'bg-gradient-to-br from-rose-400 to-rose-500 shadow-rose-200'}`}>
           <div className="flex flex-col gap-4">
-            {/* 距离上次喂奶时间 */}
             <div className={`rounded-xl p-3 flex items-center justify-between ${darkMode ? 'bg-gray-700/50' : 'bg-white/20 backdrop-blur-sm'}`}>
               <div className={`flex items-center gap-2 font-medium text-sm ${darkMode ? 'text-gray-300' : 'text-rose-50'}`}>
                 <Timer size={16} />
@@ -736,7 +655,6 @@ export default function BabyMilkTracker() {
                 {timeSinceLastFeed || '暂无数据'}
               </div>
             </div>
-
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h2 className={`font-medium text-sm flex items-center gap-2 ${darkMode ? 'text-gray-400' : 'text-rose-100'}`}>
@@ -754,7 +672,6 @@ export default function BabyMilkTracker() {
           </div>
         </div>
 
-        {/* Vitamin D3 Tracker */}
         <div className={`rounded-2xl p-4 shadow-sm border transition-colors duration-300 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-blue-50'}`}>
           <div className="flex items-center justify-between">
             <h3 className={`font-semibold ml-1 flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
@@ -779,7 +696,6 @@ export default function BabyMilkTracker() {
           </div>
         </div>
 
-        {/* Add Record Form */}
         {isToday ? (
           <div className={`rounded-2xl p-4 shadow-sm border transition-colors duration-300 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-rose-100'}`}>
             <label className={`block text-sm font-medium mb-2 ml-1 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
@@ -820,8 +736,6 @@ export default function BabyMilkTracker() {
                 记录
               </button>
             </div>
-            
-            {/* Quick add suggestions */}
             <div className="flex gap-2 mt-3 overflow-x-auto pb-1 hide-scrollbar">
               {[120, 150, 180, 190, 200, 210].map((val) => (
                 <button
@@ -844,7 +758,6 @@ export default function BabyMilkTracker() {
           </div>
         )}
 
-        {/* Records List */}
         <div className="space-y-4">
           <h3 className={`font-semibold ml-1 flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
             <History size={18} className="text-gray-400" />
@@ -863,7 +776,6 @@ export default function BabyMilkTracker() {
                   darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-100'
                 }`}>
                   {editingRecord === record.id ? (
-                    // 编辑模式
                     <div className="flex-1 flex items-center gap-3 flex-wrap">
                       <input
                         type="number"
@@ -898,7 +810,6 @@ export default function BabyMilkTracker() {
                       </button>
                     </div>
                   ) : deletingId === record.id ? (
-                    // 删除确认模式
                     <div className="flex-1 flex items-center justify-between animate-in fade-in slide-in-from-right-5 duration-200">
                       <div className="flex items-center gap-2 text-red-500 font-medium">
                         <AlertCircle size={20} />
@@ -922,7 +833,6 @@ export default function BabyMilkTracker() {
                       </div>
                     </div>
                   ) : (
-                    // 正常显示模式
                     <>
                       <div className="flex items-center gap-4">
                         <div className={`p-2.5 rounded-xl ${darkMode ? 'bg-gray-700 text-blue-400' : 'bg-blue-50 text-blue-500'}`}>
@@ -937,7 +847,6 @@ export default function BabyMilkTracker() {
                           </div>
                         </div>
                       </div>
-                      
                       <div className="flex items-center gap-2">
                         <button 
                           onClick={() => startEdit(record)}
@@ -967,7 +876,6 @@ export default function BabyMilkTracker() {
         </div>
       </main>
 
-      {/* Trend Chart Modal */}
       {showTrendChart && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className={`w-full max-w-2xl rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
@@ -983,7 +891,6 @@ export default function BabyMilkTracker() {
                 <X size={20} />
               </button>
             </div>
-
             <div className="flex-1 overflow-y-auto p-6">
               <div className="grid grid-cols-3 gap-3 mb-6">
                 <div className={`rounded-xl p-4 ${darkMode ? 'bg-blue-900/30' : 'bg-blue-50'}`}>
@@ -999,7 +906,6 @@ export default function BabyMilkTracker() {
                   <div className={`text-2xl font-bold ${darkMode ? 'text-orange-200' : 'text-orange-700'}`}>{trendStats.min}<span className="text-sm ml-1">ml</span></div>
                 </div>
               </div>
-
               <div className={`rounded-2xl p-4 ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
                 <div className="relative h-72">
                   <div className="absolute left-0 top-0 bottom-8 w-10 flex flex-col justify-between text-xs text-gray-500 text-right pr-1">
@@ -1010,14 +916,12 @@ export default function BabyMilkTracker() {
                     <span>300</span>
                     <span>0</span>
                   </div>
-                  
                   <div className="ml-11 h-full relative pb-8">
                     <div className="absolute inset-0 bottom-8 flex flex-col justify-between">
                       {[0, 1, 2, 3, 4, 5].map(i => (
                         <div key={i} className={`border-t ${darkMode ? 'border-gray-600' : 'border-gray-200'}`}></div>
                       ))}
                     </div>
-                    
                     <svg className="absolute w-full h-full bottom-8" style={{ left: '10px', right: '10px', overflow: 'visible' }} viewBox="0 0 100 100" preserveAspectRatio="none">
                       <path
                         d={trendData.map((d, i) => {
@@ -1031,13 +935,11 @@ export default function BabyMilkTracker() {
                         vectorEffect="non-scaling-stroke"
                       />
                     </svg>
-                    
                     <div className="absolute w-full h-full bottom-8" style={{ left: '10px', right: '10px' }}>
                       {trendData.map((d, i) => {
                         const xPercent = (i / (trendData.length - 1)) * 100;
                         const yPercent = 100 - Math.min((d.total / 1500) * 100, 100);
                         const isTodayDate = d.date === new Date().toISOString().split('T')[0];
-                        
                         return (
                           <div
                             key={i}
@@ -1056,7 +958,6 @@ export default function BabyMilkTracker() {
                         );
                       })}
                     </div>
-                    
                     <div className="absolute bottom-0 left-0 right-0 flex justify-between text-xs text-gray-500">
                       <span>{trendData[0]?.shortDate}</span>
                       <span>{trendData[Math.floor(trendData.length / 2)]?.shortDate}</span>
@@ -1070,7 +971,6 @@ export default function BabyMilkTracker() {
         </div>
       )}
 
-      {/* Stats Overlay Modal */}
       {showStats && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className={`w-full max-w-md rounded-3xl h-auto max-h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
@@ -1086,7 +986,6 @@ export default function BabyMilkTracker() {
                 <X size={20} />
               </button>
             </div>
-
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
               {dailyStats.length === 0 ? (
                 <div className="text-center py-10 text-gray-400">
@@ -1126,7 +1025,6 @@ export default function BabyMilkTracker() {
                 ))
               )}
             </div>
-            
             <div className={`p-4 border-t shrink-0 text-center text-xs text-gray-400 ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
               仅统计有记录的日期
             </div>
